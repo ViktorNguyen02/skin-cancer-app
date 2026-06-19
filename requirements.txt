@@ -1,0 +1,15 @@
+numpy
+pandas
+scipy
+matplotlib
+seaborn
+plotly
+scikit-learn
+tensorflow==2.13.1
+tensorflow-metal==1.2.0
+flask
+opencv-python
+gunicorn
+pillow
+h5py
+xhtml2pdf

@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Low Confidence Warning</title>
+    <!-- ✅ Bootstrap 5 CDN -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+</head>
+<body class="bg-light text-center p-4">
+
+    <div class="container mt-5">
+
+        <!-- ⚠️ Low confidence warning alert -->
+        <div class="alert alert-warning" role="alert">
+            <h2 class="mb-3">⚠️ Low Confidence Prediction</h2>
+            <p class="lead">
+                The model is <strong>{{ confidence | round(2) }}%</strong> confident about this prediction.
+            </p>
+            <p>This may not be a valid or clear skin lesion image.</p>
+            <p>Please try again with a higher-quality image.</p>
+        </div>
+
+        <!-- ℹ️ Confidence threshold explanation -->
+        <div class="alert alert-info text-start mx-auto" style="max-width: 500px;">
+            <h5 class="alert-heading">Why is this uncertain?</h5>
+            <p>
+                Our system flags predictions as <strong>uncertain</strong> when model confidence is below
+                a safety threshold of <strong>70%</strong>.
+            </p>
+            <p>
+                This helps ensure that potentially ambiguous or low-quality inputs are reviewed by a medical professional,
+                instead of being misclassified.
+            </p>
+            <hr>
+            <p class="mb-0">
+                You may want to submit a clearer photo or compare results across multiple images.
+            </p>
+        </div>
+
+        <!-- 📷 Image + Retry Button in Card -->
+        <div class="card mx-auto mt-4" style="max-width: 350px;">
+            <img src="/{{ image_path }}" class="card-img-top" alt="Uploaded Image">
+            <div class="card-body">
+                <a href="/" class="btn btn-outline-primary w-100">Try Another Image</a>
+            </div>
+        </div>
+
+    </div>
+
+</body>
+</html>

@@ -1,0 +1,37 @@
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.Python
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+myenv/
+myenv311/
+.venv/
+venv/
+env/
+
+# Local configuration
+.env
+.env.*
+
+# Large datasets and trained model files
+data/
+*.h5
+*.keras
+
+# Runtime/generated app files
+app/clinical_notes.csv
+app/static/uploaded*.jpg
+app/static/gradcam*.jpg
+app/static/*.png
+app/static/*.pdf
+
+# Keep this placeholder so the static folder exists in Git
+!app/static/.gitkeep
