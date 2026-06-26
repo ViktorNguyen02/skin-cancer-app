@@ -1,33 +1,98 @@
 #%%
+# ============================================================
+# model.py — Binary Clinical CNN (Concerning vs Benign)
+# ============================================================
+# Reformulation: 7 HAM10000 classes → 2 clinical groups
+#
+#   Concerning (warrants follow-up / biopsy): mel, bcc, akiec
+#   Benign     (routine monitoring):          nv, bkl, df, vasc
+#
+# WHY binary, after the 3-class attempt failed:
+#   The 3-class model collapsed. With bkl moved to Benign, Pre-Malignant
+#   was left with only ~262 unique akiec images and the model never
+#   predicted it once (0.00 recall — the entire Pre-Malignant column of
+#   the confusion matrix was zero). The model had effectively become a
+#   binary classifier on its own; this reformulation makes that explicit
+#   and removes the fragile third class.
+#
+# WHY akiec sits on the Concerning side:
+#   Actinic keratosis is pre-malignant and can progress to SCC. Clinically
+#   it warrants follow-up, not routine dismissal — so it belongs with the
+#   lesions we want flagged, not with Benign.
+#
+# WHY this is a healthy setup:
+#   Class balance is ~4.1:1 (Benign ~8,061 vs Concerning ~1,954) — no
+#   fragile minority class. The single decision boundary the model already
+#   learns well (Malignant-vs-rest AUC ≈ 0.83) is exactly the boundary we
+#   now ask it to optimise.
+#
+# Imbalance strategy: balanced focal-loss alpha is the SINGLE correction
+#   (no oversampling, no manual boost — those stacked previously and caused
+#   the model to over-predict the positive class 2.6x). Clinical sensitivity
+#   is delivered at inference by choosing a high-sensitivity operating point
+#   on the ROC curve, reported separately from the default argmax prediction.
+# ============================================================
+
 import os
 import numpy as np
 import pandas as pd
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder
-from sklearn.utils import resample
 from sklearn.utils.class_weight import compute_class_weight
 from tensorflow.keras.models import Model
-from tensorflow.keras.layers import Conv2D, MaxPooling2D, Dense, Dropout, Input, BatchNormalization, GlobalAveragePooling2D, Add, Activation, SpatialDropout2D
-from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint
+from tensorflow.keras.layers import (Conv2D, MaxPooling2D, Dense, Dropout, Input,
+                                      BatchNormalization, GlobalAveragePooling2D,
+                                      Activation, Add, Multiply, Reshape, Concatenate)
+from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint, ReduceLROnPlateau
 from tensorflow.keras.preprocessing.image import ImageDataGenerator
 import tensorflow as tf
-from sklearn.metrics import classification_report, confusion_matrix, ConfusionMatrixDisplay
+from sklearn.metrics import (classification_report, confusion_matrix,
+                              ConfusionMatrixDisplay, f1_score,
+                              balanced_accuracy_score, recall_score,
+                              precision_score, roc_curve, roc_auc_score)
 import matplotlib.pyplot as plt
 import matplotlib.image as mpimg
-import cv2
+import seaborn as sns
 import warnings
 warnings.filterwarnings('ignore', category=UserWarning, module='keras')
 
 print("✅ All libraries imported successfully!")
-
 print("\n--- HARDWARE CHECK ---")
 print(f"TensorFlow version: {tf.__version__}")
+
 gpu_devices = tf.config.list_physical_devices('GPU')
 if gpu_devices:
-    print(f"✅ SUCCESS: TensorFlow found the Mac GPU! ({len(gpu_devices)} device(s) available)")
+    print(f"✅ GPU active: {len(gpu_devices)} device(s) available")
 else:
     print("❌ ERROR: TensorFlow is still stuck on the CPU.")
 print("----------------------\n")
+
+
+#%%
+# ============================================================
+# Clinical Grouping Definition
+# ============================================================
+# This mapping is the core change from the 7-class model.
+# Every downstream step (split, oversample, weights, generators)
+# uses CLINICAL_GROUPS as the source of truth.
+
+CLINICAL_GROUPS = {
+    'nv':    'Benign',           # Melanocytic nevi — benign, very common
+    'bkl':   'Benign',           # Benign keratosis-like — benign (seborrheic keratosis etc.)
+    'df':    'Benign',           # Dermatofibroma — benign, harmless nodule
+    'vasc':  'Benign',           # Vascular lesion — benign, non-cancerous
+    'mel':   'Concerning',       # Melanoma — life-threatening malignancy
+    'bcc':   'Concerning',       # Basal cell carcinoma — malignant, locally invasive
+    'akiec': 'Concerning',       # Actinic keratosis — pre-malignant, can progress to SCC
+}
+
+# Alphabetical encoding: Benign=0, Concerning=1
+GROUP_ORDER = ['Benign', 'Concerning']
+CONCERNING_IDX = GROUP_ORDER.index('Concerning')   # = 1; clinical "positive" class
+
+print("Clinical grouping:")
+for original, group in CLINICAL_GROUPS.items():
+    print(f"  {original:6s} → {group}")
 
 
 #%%
@@ -35,184 +100,219 @@ print("----------------------\n")
 # Load Metadata and Paths
 # ======================================================
 
-# Automatically find the folder where this script is located
-# __file__ is the current script. abspath gets its full path.
-# dirname strips the filename, leaving us with the folder path.
-# dirname is programmed with a specific rule: Find the very last slash in the string and throw away everything after it.
-# will return "/Users/couoquevietnoullaine/developer/python_projects/skin-cancer-app
 script_dir = os.path.dirname(os.path.abspath(__file__))
-
-# Build paths relative to the script location
-# We remove the hardcoded '/Users/couoquevietnoullaine/...'
 metadata_path = os.path.join(script_dir, 'data', 'HAM10000_metadata.csv')
 images_path_1 = os.path.join(script_dir, 'data', 'HAM10000_images_part_1')
 images_path_2 = os.path.join(script_dir, 'data', 'HAM10000_images_part_2')
 
-# Load the CSV with a safety check
 if os.path.exists(metadata_path):
     df = pd.read_csv(metadata_path)
-    print(f"Successfully loaded metadata: {len(df)} rows found.")
+    print(f"Loaded metadata: {len(df)} rows.")
 else:
-    print(f"ERROR: Could not find CSV at {metadata_path}")
-    # This helps you debug if the 'data' folder is missing
-    raise FileNotFoundError("Check your project structure!")
-print(df.info())           
-print(df.head())  
+    raise FileNotFoundError(f"Metadata not found at {metadata_path}")
+
+print(df.info())
+print(df.head())
+
+
 #%%
-# ==========================================================
-# Class Distribution Check
-# ==========================================================
-print("\n📊 Total count per lesion class:")
+# ======================================================
+# Class Distribution — Original vs Clinical Groups
+# ======================================================
+
+print("\nOriginal 7-class distribution:")
 print(df['dx'].value_counts())
 
-# Optional: See the percentage breakdown instead of raw counts
-print("\n📈 Percentage breakdown per class:")
-print(df['dx'].value_counts(normalize=True) * 100)
+df['group'] = df['dx'].map(CLINICAL_GROUPS)
+
+print("\nNew 2-group (binary) distribution:")
+print(df['group'].value_counts())
+print("\nPercentage breakdown:")
+print(df['group'].value_counts(normalize=True).mul(100).round(1))
+
 
 #%%
-# ==========================================================
-# THE SEARCH ENGINE (Finding the Images)
-# ==========================================================
-
-#In HAM10000, the image and label are "divorced." The CSV has the image ID and label, but not the full path to the image file.
+# ======================================================
+# Find Image Paths + Encode Group Labels
+# ======================================================
 
 def find_image_path(image_id):
-    # Check if the image exists in the 'part_1' folder
     path_1 = os.path.join(images_path_1, image_id + '.jpg')
     path_2 = os.path.join(images_path_2, image_id + '.jpg')
-    
     if os.path.exists(path_1):
         return path_1
     elif os.path.exists(path_2):
         return path_2
     else:
-        # Raise an explicit error immediately when image is missing
         raise FileNotFoundError(
             f"Image {image_id}.jpg not found in either folder:\n"
             f"  Checked: {path_1}\n"
             f"  Checked: {path_2}"
         )
 
-# Map the paths and encode labels
-# 1.to get the full address of every image.
 df['path'] = df['image_id'].map(find_image_path)
 
-# 2.Backup the names: Keep a copy of the original disease names (like 'mel') 
-# so we can still read them later.
-# the correct answers
-df['label_str'] = df['dx']
+# Integer-encode the group label for class weight computation and stratification.
+# LabelEncoder sorts alphabetically: Benign=0, Concerning=1
+group_encoder = LabelEncoder()
+df['group_label'] = group_encoder.fit_transform(df['group'])
 
-# 3. Setup the Translator: Initialize the tool that turns words into numbers.
-label_encoder = LabelEncoder()
+print(df[['image_id', 'dx', 'group', 'group_label', 'path']].head(10))
 
-# 4. Final Translation: Convert text (e.g., 'nv') into computer-friendly 
-# .fit() finds unique classes & maps them alphabetically to numbers (akiec=0, bcc=1... nv=5).
-# .transform() swaps the text for those numbers row-by-row. transforms the text into numbers
-# df['label'] = creates the new column on the fly and dumps the numbers in.
-df['label'] = label_encoder.fit_transform(df['dx'])
-
-# Show the results: Print the first 10 rows to verify the ID, name, 
-# number, and file path all match up.
-print(df[['image_id', 'dx', 'label', 'path']].head(10))
-
-print("After:", df.columns)
-
-# Get the path for the very first image
 sample_path = df['path'][0]
-
-# Try to load and display it
 try:
     img = mpimg.imread(sample_path)
     plt.imshow(img)
-    plt.title(f"Label: {df['dx'][0]}")
+    plt.title(f"dx: {df['dx'][0]}  →  group: {df['group'][0]}")
     plt.axis('off')
     plt.show()
     print("✅ Image loaded successfully!")
 except Exception as e:
     print(f"❌ Error loading image: {e}")
 
-# save the class order for later use (e.g., when interpreting predictions)
-# label_encoder.classes_ gives us the original class names in the order they were encoded 
-# (e.g., ['akiec', 'bcc', 'bkl', 'df', 'mel', 'nv', 'vasc'])
-class_order = list(label_encoder.classes_)
-
 
 #%%
 # ======================================================
-# Train/Test Split
+# Train/Test Split (by lesion_id — stratified by group)
 # ======================================================
+# Stratifying by group_label (not original 7-class label) ensures
+# each clinical group is proportionally represented in train and test.
 
-# Split by lesion_id, not by row — HAM10000 has multiple images per lesion.
-# A row-level split puts the same lesion in both train and test, leaking patient-specific
-# features (skin tone, lighting) into the test set and inflating val_accuracy.
-lesion_label_df = df.drop_duplicates(subset='lesion_id')[['lesion_id', 'label']]
-train_lesion_ids, test_lesion_ids = train_test_split(
-    lesion_label_df['lesion_id'],
+lesion_group_df = df.drop_duplicates(subset='lesion_id')[['lesion_id', 'group_label']]
+
+# First split: hold out a fully independent TEST set (by lesion_id).
+trainval_lesion_ids, test_lesion_ids = train_test_split(
+    lesion_group_df['lesion_id'],
     test_size=0.2,
-    stratify=lesion_label_df['label'],
+    stratify=lesion_group_df['group_label'],
     random_state=42
 )
+
+# Second split: carve a VALIDATION set out of the remaining train lesions.
+# WHY a separate validation set: previously test_generator was used as
+# validation_data AND for checkpoint/early-stop selection AND for final
+# reporting — selecting the model on the same data it is scored on makes
+# every reported number optimistically biased. Validation now drives ALL
+# model selection (callbacks) and threshold tuning; test is scored once at
+# the end. Splitting by lesion_id keeps a lesion's images in a single split.
+trainval_group_df = lesion_group_df[lesion_group_df['lesion_id'].isin(trainval_lesion_ids)]
+train_lesion_ids, val_lesion_ids = train_test_split(
+    trainval_group_df['lesion_id'],
+    test_size=0.15,
+    stratify=trainval_group_df['group_label'],
+    random_state=42
+)
+
 train_df_original = df[df['lesion_id'].isin(train_lesion_ids)].reset_index(drop=True)
+val_df  = df[df['lesion_id'].isin(val_lesion_ids)].reset_index(drop=True)
 test_df = df[df['lesion_id'].isin(test_lesion_ids)].reset_index(drop=True)
 
-total_images = len(train_df_original) + len(test_df)
-print(f"\nTraining samples: {len(train_df_original)} ({len(train_df_original)/total_images*100:.1f}%)")
-print(f"Testing samples:  {len(test_df)} ({len(test_df)/total_images*100:.1f}%)")
-print("(Target: ~80% / ~20% — deviation > 5pp warrants investigation)")
+# Safety: a lesion may not appear in more than one split.
+assert set(train_lesion_ids).isdisjoint(val_lesion_ids)
+assert set(train_lesion_ids).isdisjoint(test_lesion_ids)
+assert set(val_lesion_ids).isdisjoint(test_lesion_ids)
+
+total = len(train_df_original) + len(val_df) + len(test_df)
+print(f"\nTraining samples:   {len(train_df_original)} ({len(train_df_original)/total*100:.1f}%)")
+print(f"Validation samples: {len(val_df)} ({len(val_df)/total*100:.1f}%)")
+print(f"Testing samples:    {len(test_df)} ({len(test_df)/total*100:.1f}%)")
+
+print("\nTrain group distribution:")
+print(train_df_original['group'].value_counts())
+print("\nValidation group distribution:")
+print(val_df['group'].value_counts())
+print("\nTest group distribution:")
+print(test_df['group'].value_counts())
 
 
 #%%
 # ======================================================
-# Oversample Minority Classes (mild — capped at 3x)
+# Imbalance Correction — Balanced Alpha Only (no oversampling)
 # ======================================================
+# Oversampling is intentionally OMITTED. The balanced focal-loss alpha
+# (next cell) is the single imbalance correction. Stacking oversampling
+# ON TOP of balanced alpha double-counts the correction and made the model
+# over-predict the positive class 2.6x in the previous run.
+#
+# With binary ~4.1:1 balance, balanced alpha alone is sufficient; the
+# Concerning class still appears in roughly 1 of every 5 images per batch,
+# and alpha up-weights its gradient contribution.
+#
+# Knob: if Concerning recall comes out too low, a light 2x oversample of
+# Concerning can be re-introduced here — but start with alpha only.
 
-# cap oversampling at 3x the class's original count to give the model more
-# exposure to rare classes without duplicating images enough to cause memorisation
-df_list = []
-for label in train_df_original['label'].unique():
-    df_label = train_df_original[train_df_original['label'] == label]
-    target_count = min(
-        train_df_original['label'].value_counts().max(),
-        len(df_label) * 3
-    )
-    if len(df_label) < target_count:
-        df_label = resample(df_label, replace=True, n_samples=target_count, random_state=42)
-    df_list.append(df_label)
-
-train_df_balanced = pd.concat(df_list)
-print("\nClass distribution after mild oversampling:")
-print(train_df_balanced['label'].value_counts())
+train_df_balanced = train_df_original
+print("\nNo oversampling applied. Training group distribution:")
+print(train_df_balanced['group'].value_counts())
 
 
 #%%
 # ======================================================
-# Class Weights
+# Focal Loss with Balanced Alpha Weights (single correction)
 # ======================================================
+# Focal loss is retained from the improved_model.py analysis.
+# Benign still makes up ~80% of images, so the model would prefer
+# predicting Benign unless corrected. gamma=2 automatically down-weights
+# confident Benign predictions so gradient focus stays on Concerning.
+#
+# NO manual clinical boost. The previous run stacked oversampling +
+# balanced alpha + a 1.5x manual boost, all pushing the same direction,
+# which made the model over-predict the positive class 2.6x. Here the
+# sqrt-softened balanced alpha is the ONLY imbalance correction.
+#
+# Clinical sensitivity is NOT baked into training weights — it is achieved
+# at inference by selecting a high-sensitivity operating point on the ROC
+# curve (see Extended Evaluation). This keeps balanced training and clinical
+# bias cleanly separated, which is both more defensible and easier to tune.
 
-# compute_class_weight calculates a weight for each class inversely proportional to its frequency.
-# Rare classes (df, vasc) get high weights so the loss function penalises mistakes on them more.
-# Common classes (nv) get low weights so the model isn't dominated by the majority class.
-# Use the original (pre-oversampling) distribution so weights reflect the true
-# class imbalance. Computing from train_df_balanced produces near-1.0 weights
-# for all classes, cancelling out the benefit of class weighting.
-class_weights = compute_class_weight(
+class_weights_balanced = compute_class_weight(
     class_weight='balanced',
-    classes=np.unique(train_df_original['label']),
-    y=train_df_original['label']
+    classes=np.unique(train_df_original['group_label']),
+    y=train_df_original['group_label']
 )
-# Square root softens extreme ratios: the raw balanced weights produce a ~47:1 ratio
-# (vasc vs nv), which causes the model to over-predict rare classes with terrible
-# precision while misclassifying 57% of nv images. Sqrt brings the ratio to ~7:1,
-# preserving the directional imbalance correction without destroying nv recall.
-class_weights_softened = np.sqrt(class_weights)
-class_weight_dict = dict(enumerate(class_weights_softened))
-# Boost mel and akiec — both are clinically important (malignant/precancerous)
-# and still under-recalled (mel=0.60, akiec=0.44) in the previous run.
-# class order is alphabetical: akiec=0, bcc=1, bkl=2, df=3, mel=4, nv=5, vasc=6
-class_weight_dict[0] *= 1.5  # akiec
-class_weight_dict[4] *= 1.5  # mel
-print("\nClass weights (sqrt-softened, mel+akiec boosted):")
-print(class_weight_dict)
+
+alpha_raw = np.sqrt(class_weights_balanced).astype(np.float32)
+alpha_normalized = (alpha_raw / alpha_raw.sum()).astype(np.float32)
+
+print("\nFocal loss alpha (sqrt-softened balanced, normalized to sum=1):")
+for group, a in zip(GROUP_ORDER, alpha_normalized):
+    print(f"  {group:15s}: {a:.4f}")
+
+
+def make_focal_loss(gamma=2.0, alpha=None, label_smoothing=0.0):
+    """Focal loss with balanced alpha and optional label smoothing.
+
+    Run 1 (calibration fix):
+      - gamma lowered 2.0 → 1.5: gamma=2.0 over-suppressed confident predictions,
+        compressing all probabilities into 0.0–0.8 and making argmax-0.5 useless.
+        gamma=1.5 is the standard for this ~4:1 imbalance and lets confident
+        Concerning predictions push past 0.5.
+      - label_smoothing=0.05: softens the one-hot targets so the model is not
+        driven to the over-confident-but-compressed regime. Standard formula
+        y = y*(1-eps) + eps/num_classes, applied before computing p_t.
+    """
+    alpha_t = tf.constant(alpha, dtype=tf.float32) if alpha is not None else None
+
+    def focal_loss(y_true, y_pred):
+        y_true = tf.cast(y_true, tf.float32)
+        if label_smoothing > 0:
+            num_classes = tf.cast(tf.shape(y_true)[-1], tf.float32)
+            y_true = y_true * (1.0 - label_smoothing) + label_smoothing / num_classes
+        y_pred = tf.clip_by_value(y_pred, 1e-7, 1.0 - 1e-7)
+        p_t = tf.reduce_sum(y_true * y_pred, axis=-1)
+        ce = -tf.math.log(p_t)
+        focal_weight = tf.pow(1.0 - p_t, gamma)
+        if alpha_t is not None:
+            a_t = tf.reduce_sum(alpha_t * y_true, axis=-1)
+            loss = a_t * focal_weight * ce
+        else:
+            loss = focal_weight * ce
+        return tf.reduce_mean(loss)
+
+    return focal_loss
+
+focal_loss_fn = make_focal_loss(gamma=1.5, alpha=alpha_normalized, label_smoothing=0.05)
+print("\nFocal loss ready (Run 1: gamma=1.5, label_smoothing=0.05).")
 
 
 #%%
@@ -221,215 +321,257 @@ print(class_weight_dict)
 # ======================================================
 
 IMG_SIZE = 224
-BATCH_SIZE = 64
+BATCH_SIZE = 32
 
-# define the data augmentation for the training set
+# ── Run 2: Colour constancy (Shades-of-Gray, Minkowski p=6) ───────────
+# HAM10000 images come from multiple sources with different illumination /
+# white-balance. The model otherwise keys on ABSOLUTE colour, which drifts
+# between sources — this is a major driver of the bkl↔akiec confusion, since
+# both share brown/tan pigment and the model cannot tell "tan because akiec"
+# from "tan because of the camera/light". Shades-of-Gray estimates the scene
+# illuminant per channel and divides it out, so every image is rendered under
+# a canonical neutral light. This makes bkl and akiec separable on their TRUE
+# colour/texture rather than on illumination artefacts.
+#
+# Applied identically to train / val / test (must match — a model trained on
+# colour-normalised images must be evaluated on colour-normalised images).
+# The function returns a [0,1] image, so rescale is set to None (no /255).
+def shades_of_gray(img, power=6):
+    img = img.astype('float32')
+    # Per-channel Minkowski p-norm mean = the illuminant estimate.
+    illum = np.power(np.mean(np.power(img, power), axis=(0, 1)), 1.0 / power)
+    # Normalise illuminant to a unit vector, then to the neutral-grey axis.
+    illum = illum / (np.sqrt(np.sum(illum ** 2)) + 1e-6) * np.sqrt(3.0)
+    img = img / (illum + 1e-6)          # divide the illuminant out
+    img = np.clip(img, 0, 255)
+    return img / 255.0                   # → [0,1]; rescale=None below
+
 train_datagen = ImageDataGenerator(
-    rescale=1./255,
-    rotation_range=180,
-    width_shift_range=0.2,
+    rescale=None,                       # Run 2: shades_of_gray already returns [0,1]
+    preprocessing_function=shades_of_gray,
+    rotation_range=90,              # softened from 180 — extreme rotations injected outlier
+    width_shift_range=0.2,          # batches that contributed to the epoch-8 val_loss spike
     height_shift_range=0.2,
     horizontal_flip=True,
     vertical_flip=True,
     zoom_range=0.2,
-    brightness_range=[0.8, 1.2],
+    brightness_range=[0.9, 1.1],    # softened from [0.8, 1.2] for the same reason
     shear_range=0.1,
     fill_mode='nearest'
 )
 
-# for the validation set, we only rescale the pixel values to be between 0 and 1 
-test_datagen = ImageDataGenerator(rescale=1./255)
+test_datagen = ImageDataGenerator(rescale=None, preprocessing_function=shades_of_gray)
 
-# flow_from_dataframe() creates an iterator that reads images from the paths in the DataFrame, 
-# applies the specified augmentations, 
-# and yields batches of (image, label) pairs for training and validation.
 train_generator = train_datagen.flow_from_dataframe(
     dataframe=train_df_balanced,
-    x_col='path',        # the question: where are the images?
-    y_col='label_str',   # the answer: what are the labels? 
+    x_col='path',
+    y_col='group',              # clinical group name column
     target_size=(IMG_SIZE, IMG_SIZE),
     batch_size=BATCH_SIZE,
-    classes=class_order,
+    classes=GROUP_ORDER,        # ['Benign', 'Concerning']
     class_mode='categorical',
     shuffle=True
 )
 
-test_generator = test_datagen.flow_from_dataframe(
-    dataframe=test_df,
-    x_col='path',            # the question: where are the images?
-    y_col='label_str',       # the answer: what are the labels? 
+# Validation generator — drives all model selection (callbacks) and threshold tuning.
+val_generator = test_datagen.flow_from_dataframe(
+    dataframe=val_df,
+    x_col='path',
+    y_col='group',
     target_size=(IMG_SIZE, IMG_SIZE),
     batch_size=BATCH_SIZE,
-    classes=class_order,
+    classes=GROUP_ORDER,
     class_mode='categorical',
     shuffle=False
 )
-# get the number of classes
+
+# Test generator — held out, scored exactly once in Extended Evaluation.
+test_generator = test_datagen.flow_from_dataframe(
+    dataframe=test_df,
+    x_col='path',
+    y_col='group',
+    target_size=(IMG_SIZE, IMG_SIZE),
+    batch_size=BATCH_SIZE,
+    classes=GROUP_ORDER,
+    class_mode='categorical',
+    shuffle=False
+)
+
 num_classes = len(train_generator.class_indices)
+print(f"\nClass indices: {train_generator.class_indices}")
+print(f"Steps per epoch: {len(train_generator)}")
+
 
 #%%
-# ==========================
-# Build CNN Model
-# ==========================
-# Architecture: VGG-style residual CNN — 4 blocks, 2 convolutions per block,
-# filters scaling 64→128→256→512, residual skip connections, expanded dense head.
+# ============================================================
+# Build CNN Model — SE-Residual CNN with Multi-Scale Fusion
+# ============================================================
+# Built FROM SCRATCH (no pretrained weights / no transfer learning). This is
+# the paper's architectural contribution. Three custom mechanisms replace the
+# plain 4-block sequential CNN, each chosen to raise the discriminative ceiling
+# (AUC) that a shallow single-scale net could not exceed (~0.867):
 #
-# Design rationale for research:
+# (1) Residual connections (He et al. style, trained from scratch):
+#     Each block adds its input to its output via an identity/1×1-projection
+#     skip. Skips keep gradients healthy, which lets the network go DEEPER
+#     (5 stages here vs 4 before) without the vanishing-gradient stall that
+#     keeps from-scratch plain CNNs shallow. Depth = richer feature hierarchy.
 #
-# (1) Two convolutions per block (VGG-style, Simonyan & Zisserman 2015):
-#     Two stacked 3×3 convolutions capture the same receptive field as a single 5×5
-#     convolution but with fewer parameters and two non-linearities — giving the
-#     model more representational depth per spatial level.
+# (2) Squeeze-and-Excitation (SE) channel attention:
+#     After each block, a tiny GAP → Dense(C/r, relu) → Dense(C, sigmoid)
+#     gate re-weights feature channels, letting the network emphasise the
+#     channels that encode concerning markers (colour asymmetry, irregular
+#     borders, atypical vasculature) and suppress irrelevant ones. ~1% extra
+#     params for a reliable accuracy lift on dermoscopy.
 #
-# (2) Residual (skip) connections (He et al. 2016 — ResNet):
-#     Each block adds its input directly to its output: output = F(x) + x.
-#     This keeps gradients non-zero through depth (vanishing gradient mitigation)
-#     and lets the network learn incremental feature refinements rather than full
-#     transformations, which is easier to optimise from limited data.
-#     A 1×1 projection convolution is used when filter dimensions change between blocks.
+# (3) Multi-scale feature fusion:
+#     Lesion scale varies enormously. Instead of classifying only on the
+#     final (coarsest) feature map, we GAP-pool the last THREE stages and
+#     concatenate them, so the classifier sees fine texture AND global shape.
 #
-# (3) Filters start at 64, scale to 512:
-#     Starting at 32 filters for a 224×224 input is undersized — standard practice
-#     (VGG, ResNet) starts at 64 and doubles at each pooling step to progressively
-#     compress spatial resolution while expanding feature dimensionality.
-#
-# (4) SpatialDropout2D between blocks (Tompson et al. 2015):
-#     Regular Dropout drops individual activations, but adjacent pixels in feature
-#     maps are spatially correlated — neighbours fill in the dropped signal.
-#     SpatialDropout2D drops entire feature maps, forcing the model to not rely
-#     on any single channel, providing stronger regularisation for conv layers.
-#
-# (5) Dense(512) → Dense(256) classifier head with L2 weight decay:
-#     A single Dense(256) layer is a bottleneck when the GAP output has 512 features.
-#     Two dense layers with L2 regularisation give the classifier more capacity
-#     while regularising against overfitting on the small dataset.
+# Focal loss, val_auc checkpointing, and the 3-way split are all unchanged —
+# only the feature extractor is replaced.
 
-def residual_block(x, filters):
+def se_block(x, ratio=16):
+    """Squeeze-and-Excitation channel attention (custom, from scratch)."""
+    c = x.shape[-1]
+    s = GlobalAveragePooling2D()(x)
+    s = Dense(max(c // ratio, 8), activation='relu')(s)
+    s = Dense(c, activation='sigmoid')(s)
+    s = Reshape((1, 1, c))(s)
+    return Multiply()([x, s])
+
+
+def se_residual_block(x, filters, dropout):
+    """Two 3×3 convs + SE attention + residual skip, then downsample.
+
+    The skip is a 1×1 conv projection when the channel count changes
+    (it always does here, since each stage doubles filters), otherwise
+    identity. Add happens BEFORE pooling so both paths share spatial dims.
+    """
     shortcut = x
-    # Project shortcut to match filter dimension when it changes between blocks.
-    # A 1×1 convolution without bias followed by BN is the standard projection
-    # shortcut from ResNet (option B in He et al. 2016).
-    if int(x.shape[-1]) != filters:
-        shortcut = Conv2D(filters, 1, padding='same', use_bias=False)(shortcut)
+    if shortcut.shape[-1] != filters:
+        shortcut = Conv2D(filters, 1, padding='same')(shortcut)
         shortcut = BatchNormalization()(shortcut)
 
-    # First convolution: transform the feature maps
-    x = Conv2D(filters, 3, padding='same', use_bias=False)(x)
-    x = BatchNormalization()(x)
-    x = Activation('relu')(x)
+    f = Conv2D(filters, 3, padding='same')(x)
+    f = BatchNormalization()(f)
+    f = Activation('relu')(f)
+    f = Conv2D(filters, 3, padding='same')(f)
+    f = BatchNormalization()(f)
+    f = se_block(f)                       # channel attention before the skip add
+    f = Add()([f, shortcut])             # residual connection
+    f = Activation('relu')(f)
+    f = MaxPooling2D(2, 2)(f)            # halve spatial resolution
+    f = Dropout(dropout)(f)
+    return f
 
-    # Second convolution: refine the transformed features
-    x = Conv2D(filters, 3, padding='same', use_bias=False)(x)
-    x = BatchNormalization()(x)
 
-    # Add shortcut: the network only needs to learn the residual (difference)
-    # rather than the full transformation — easier to optimise
-    x = Add()([x, shortcut])
-    x = Activation('relu')(x)
-    return x
+inputs = Input(shape=(IMG_SIZE, IMG_SIZE, 3))
 
-inputs = Input(shape=(IMG_SIZE, IMG_SIZE, 3))             # (224, 224,   3)
-
-# Stem (ResNet-style): reduces spatial resolution from 224→56 before residual
-# blocks begin. Without this, Block 1 runs two 3×3 convolutions with 64 filters
-# at 224×224 — ~3.7B multiply-adds per image per conv (~10 min/epoch).
-# The 7×7 stride-2 conv brings 224→112 in one pass; MaxPool brings 112→56.
-# All residual blocks then operate at 56×56 or smaller — Block 1 is ~16× cheaper.
-x = Conv2D(64, 7, strides=2, padding='same', use_bias=False)(inputs)    # (112, 112,  64)
+# Stem: a plain conv to lift 3→32 channels before the residual stages.
+x = Conv2D(32, 3, padding='same')(inputs)
 x = BatchNormalization()(x)
 x = Activation('relu')(x)
-x = MaxPooling2D(3, strides=2, padding='same')(x)                        # ( 56,  56,  64)
 
-x = residual_block(x, 64)                                                # ( 56,  56,  64)
-x = MaxPooling2D(2, 2)(x)                                                # ( 28,  28,  64)
-x = SpatialDropout2D(0.10)(x)
+# 5 SE-residual stages: 224 → 112 → 56 → 28 → 14 → 7
+s1 = se_residual_block(x,  64,  dropout=0.10)   # 112×112×64
+s2 = se_residual_block(s1, 128, dropout=0.15)   # 56×56×128
+s3 = se_residual_block(s2, 256, dropout=0.20)   # 28×28×256
+s4 = se_residual_block(s3, 384, dropout=0.20)   # 14×14×384
+s5 = se_residual_block(s4, 512, dropout=0.25)   # 7×7×512
 
-x = residual_block(x, 128)                                               # ( 28,  28, 128)
-x = MaxPooling2D(2, 2)(x)                                                # ( 14,  14, 128)
-x = SpatialDropout2D(0.10)(x)
+# Multi-scale fusion: pool the last three stages and concatenate.
+# (384 from s4's input scale captured via s3, 256+384+512 across scales.)
+ms = Concatenate()([
+    GlobalAveragePooling2D()(s3),   # 256 — finer / mid scale
+    GlobalAveragePooling2D()(s4),   # 384 — coarser
+    GlobalAveragePooling2D()(s5),   # 512 — coarsest / global
+])                                   # → 1152 features
 
-x = residual_block(x, 256)                                               # ( 14,  14, 256)
-x = MaxPooling2D(2, 2)(x)                                                # (  7,   7, 256)
-x = SpatialDropout2D(0.15)(x)
+# Classifier head.
+h = Dense(256, activation='relu')(ms)
+h = BatchNormalization()(h)
+h = Dropout(0.40)(h)
+outputs = Dense(num_classes, activation='softmax')(h)
 
-x = residual_block(x, 512)                                               # (  7,   7, 512)
-x = SpatialDropout2D(0.20)(x)
+model = Model(inputs=inputs, outputs=outputs, name='SE_Residual_MultiScale_CNN')
 
-x = GlobalAveragePooling2D()(x)                                          # (512,)
-
-x = Dense(512, activation='relu',
-          kernel_regularizer=tf.keras.regularizers.l2(1e-4))(x)
-x = BatchNormalization()(x)
-x = Dropout(0.4)(x)
-
-x = Dense(256, activation='relu',
-          kernel_regularizer=tf.keras.regularizers.l2(1e-4))(x)
-x = BatchNormalization()(x)
-x = Dropout(0.3)(x)
-
-outputs = Dense(num_classes, activation='softmax')(x)
-
-model = Model(inputs, outputs)
-
-# Cosine decay over 80 epochs. LR lowered to 5e-4 (from 1e-3) because the deeper
-# residual architecture has more parameters and is sensitive to large initial steps —
-# a lower LR stabilises early training without needing an explicit warmup phase.
-# 80 epochs gives the model enough time to converge through the larger parameter space.
-steps_per_epoch = len(train_generator)
-lr_schedule = tf.keras.optimizers.schedules.CosineDecay(
-    initial_learning_rate=5e-4,
-    decay_steps=80 * steps_per_epoch,
-    alpha=1e-6
-)
+# LR 3e-4 (lowered from 5e-4): the previous run showed a val_loss spike at
+# epoch 8–9, a sign that 5e-4 sat at the edge of stability with focal loss.
+# A flat 3e-4 + ReduceLROnPlateau (see training cell) replaces the fixed
+# CosineDecay schedule so the LR adapts to the actual val_auc plateau instead
+# of decaying on a fixed timetable. clipnorm=1.0 caps the gradient magnitude,
+# which prevents a single bad augmentation batch from causing a loss spike.
 model.compile(
-    optimizer=tf.keras.optimizers.Adam(learning_rate=lr_schedule),
-    loss=tf.keras.losses.CategoricalCrossentropy(label_smoothing=0.1),
+    optimizer=tf.keras.optimizers.Adam(learning_rate=3e-4, clipnorm=1.0),
+    loss=focal_loss_fn,
     metrics=['accuracy']
 )
 model.summary()
-#%%
-# ==========================
-# Fine-Tune from Checkpoint
-# ==========================
-# Run this cell INSTEAD of the Build CNN Model cell above when continuing from
-# a saved checkpoint. Loads best_model.h5 and recompiles with a lower LR so
-# training resumes from epoch-30 weights rather than random initialisation.
 
-from tensorflow.keras.models import load_model as keras_load_model
-
-model = keras_load_model('best_model.h5')
-print("✅ Loaded best_model.h5 — resuming from saved weights.")
-model.summary()
-
-steps_per_epoch = len(train_generator)
-lr_schedule_finetune = tf.keras.optimizers.schedules.CosineDecay(
-    initial_learning_rate=1e-4,   # 10x lower than the original run
-    decay_steps=30 * steps_per_epoch,
-    alpha=1e-7
-)
-model.compile(
-    optimizer=tf.keras.optimizers.Adam(learning_rate=lr_schedule_finetune),
-    loss=tf.keras.losses.CategoricalCrossentropy(label_smoothing=0.1),
-    metrics=['accuracy']
-)
 
 #%%
 # ==========================
 # Train the Model
 # ==========================
+# Checkpoint on val_auc, NOT val_balanced_acc / val_loss / val_accuracy.
+#
+# WHY val_auc: balanced_accuracy is computed at the argmax-0.5 threshold, which
+# is exactly the operating point the model is least stable at. The previous run
+# showed val_balanced_acc oscillating 0.50↔0.74 epoch to epoch and never
+# converging, so the checkpoint was saved on whichever epoch that NOISY metric
+# happened to peak — a "lucky epoch", not a durably good model. AUC is
+# threshold-INDEPENDENT: it measures how well the model ranks Concerning above
+# Benign across all thresholds, which is the part of the model that is actually
+# stable (AUC ≈ 0.866). Selecting on val_auc picks a genuinely good model; the
+# operating threshold is then chosen separately (see Extended Evaluation).
+#
+# val_balanced_acc and val_macro_f1 are still computed and printed as
+# diagnostics, and val_balanced_acc is still plotted, but they no longer drive
+# checkpoint/early-stop selection.
+#
+# Implementation: a small callback computes these on the VALIDATION set each
+# epoch and injects them into `logs`, so the standard callbacks can monitor
+# them. It MUST run first so the metrics exist before the others read them.
 
+class ValMetrics(tf.keras.callbacks.Callback):
+    def __init__(self, val_gen):
+        super().__init__()
+        self.val_gen = val_gen
+
+    def on_epoch_end(self, epoch, logs=None):
+        logs = logs if logs is not None else {}
+        self.val_gen.reset()
+        probs = self.model.predict(self.val_gen, verbose=0)
+        y_pred = np.argmax(probs, axis=1)
+        y_true = np.array(self.val_gen.classes)
+        logs['val_auc']          = roc_auc_score(y_true, probs[:, CONCERNING_IDX])
+        logs['val_balanced_acc'] = balanced_accuracy_score(y_true, y_pred)
+        logs['val_macro_f1']     = f1_score(y_true, y_pred, average='macro')
+        print(f"  — val_auc: {logs['val_auc']:.4f}  "
+              f"val_balanced_acc: {logs['val_balanced_acc']:.4f}  "
+              f"val_macro_f1: {logs['val_macro_f1']:.4f}")
+
+# Ablation run name — each run saves to its own file so the table is reproducible.
+# Run 2 = Run 1 (gamma=1.5 + label_smoothing=0.05) + Shades-of-Gray colour constancy.
+MODEL_PATH = 'best_model_run2_color.h5'
 
 callbacks = [
-    EarlyStopping(monitor='val_loss', patience=15, restore_best_weights=True),
-    ModelCheckpoint('best_model.h5', monitor='val_loss', save_best_only=True),
+    ValMetrics(val_generator),         # MUST be first — populates logs for the callbacks below
+    EarlyStopping(monitor='val_auc', mode='max', patience=15,
+                  restore_best_weights=True),
+    ModelCheckpoint(MODEL_PATH, monitor='val_auc',
+                    mode='max', save_best_only=True),
+    ReduceLROnPlateau(monitor='val_auc', mode='max', factor=0.5,
+                      patience=4, min_lr=1e-6, verbose=1),
 ]
 
 history = model.fit(
     train_generator,
-    validation_data=test_generator,
+    validation_data=val_generator,
     epochs=60,
-    callbacks=callbacks,
-    class_weight=class_weight_dict
+    callbacks=callbacks
 )
 
 
@@ -438,7 +580,6 @@ history = model.fit(
 # Evaluate the Model
 # ==========================
 
-# Before evaluating, we reset the test generator to ensure it starts from the beginning of the dataset.
 test_generator.reset()
 loss, accuracy = model.evaluate(test_generator)
 print(f"\nTest Accuracy: {accuracy * 100:.2f}%")
@@ -449,11 +590,11 @@ print(f"\nTest Accuracy: {accuracy * 100:.2f}%")
 # Save the Model
 # ==========================
 
-if os.path.exists('best_model.h5'):
-    size_mb = os.path.getsize('best_model.h5') / (1024 * 1024)
-    print(f"✅ best_model.h5 confirmed ({size_mb:.1f} MB) — contains best val_loss weights.")
+if os.path.exists(MODEL_PATH):
+    size_mb = os.path.getsize(MODEL_PATH) / (1024 * 1024)
+    print(f"✅ {MODEL_PATH} confirmed ({size_mb:.1f} MB)")
 else:
-    print("❌ best_model.h5 not found — ModelCheckpoint may not have fired (check val_loss never improved).")
+    print(f"❌ {MODEL_PATH} not found — ModelCheckpoint may not have fired.")
 
 
 #%%
@@ -461,140 +602,215 @@ else:
 # Extended Evaluation
 # ==========================
 
-# Reset the test generator to ensure it starts from the beginning of the dataset for accurate predictions.
 test_generator.reset()
-# Get true and predicted labels
-true_labels = test_generator.classes
-# looks at images and outputs probabilities
-pred_probs = model.predict(test_generator) 
-# argmax() finds the index of the highest probability for each image, 
-# which corresponds to the predicted class label.
-# axis = 1 means we look across columns (the class probabilities) for each row (image).
+true_labels = np.array(test_generator.classes)   # explicit cast — generator returns list in TF 2.13
+pred_probs = model.predict(test_generator)
+
+# PRIMARY prediction: plain argmax (equivalent to a 0.5 threshold in binary).
+# No threshold-first logic — the threshold tuning is reported separately below
+# as a clinical-screening analysis, not used to override the default prediction.
+conc_probs = pred_probs[:, CONCERNING_IDX]
 pred_labels = np.argmax(pred_probs, axis=1)
+print(f"Concerning predictions at argmax (0.5): {np.sum(pred_labels == CONCERNING_IDX)} "
+      f"(true Concerning count: {np.sum(true_labels == CONCERNING_IDX)})")
 
-# === 1. Classification Report ===
 print("\nClassification Report:")
-# generates a text report showing the main classification metrics (precision, recall, f1-score) for each class.
-# comparing the true_labels to the pred_labels.
-# target_names: Names of the classes for the classification report 
-print(classification_report(true_labels, pred_labels, target_names=test_generator.class_indices.keys()))
+print(classification_report(true_labels, pred_labels, target_names=GROUP_ORDER))
+print(f"Macro F1:          {f1_score(true_labels, pred_labels, average='macro'):.4f}")
+print(f"Balanced Accuracy: {balanced_accuracy_score(true_labels, pred_labels):.4f}")
 
-# === 2. Confusion Matrix ===
-# calculates the confusion matrix to visualize the performance of the classification model.
-cm = confusion_matrix(true_labels, pred_labels)
-# Takes the raw math (cm) and prepares it to be drawn as a pretty, color-coded visual graph
-disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=test_generator.class_indices.keys())
-# tilts the text at 45 degrees
-disp.plot(xticks_rotation=45)
-plt.title("Confusion Matrix")
+# ── Clinical Binary Metrics (at the default 0.5 argmax) ───────────────
+# The most important single number for clinical use is Concerning recall
+# (sensitivity): what fraction of actual mel + bcc + akiec cases did the
+# model correctly flag for follow-up? A missed concerning lesion is the
+# worst outcome. In binary mode these metrics come straight from argmax.
+conc_true = (true_labels == CONCERNING_IDX).astype(int)
+conc_pred = (pred_labels == CONCERNING_IDX).astype(int)
+
+conc_sensitivity  = recall_score(conc_true, conc_pred)
+conc_specificity  = recall_score(1 - conc_true, 1 - conc_pred)
+conc_precision    = precision_score(conc_true, conc_pred, zero_division=0)
+
+print("\n=== Clinical Binary Metrics @ argmax 0.5 (Concerning vs Benign) ===")
+print(f"  Sensitivity (Concerning Recall): {conc_sensitivity:.4f}  — fraction of mel+bcc+akiec correctly flagged")
+print(f"  Specificity (Benign Recall):     {conc_specificity:.4f}  — fraction of benign correctly cleared")
+print(f"  PPV (Concerning Precision):      {conc_precision:.4f}  — fraction of flagged cases that are truly concerning")
+
+# ── Screening threshold: SELECTED ON VALIDATION, APPLIED TO TEST ──────
+# WHY select on validation: a screening operating point chosen on the test set
+# (as the previous version did) is tuned to the very data it is then scored on,
+# so its reported sensitivity/specificity are optimistically biased. The honest
+# procedure is to pick the threshold on the held-out validation set and report
+# how that FIXED threshold performs on the untouched test set.
+TARGET_SENS = 0.90
+
+val_generator.reset()
+val_true   = np.array(val_generator.classes)
+val_conc_probs = model.predict(val_generator)[:, CONCERNING_IDX]
+val_conc_true  = (val_true == CONCERNING_IDX).astype(int)
+
+val_fpr, val_tpr, val_thresholds = roc_curve(val_conc_true, val_conc_probs)
+# Smallest-FPR threshold on VALIDATION achieving Sens ≥ TARGET_SENS.
+val_elig = np.where(val_tpr >= TARGET_SENS)[0]
+val_hs_idx = val_elig[np.argmin(val_fpr[val_elig])] if len(val_elig) else int(np.argmax(val_tpr))
+hs_threshold = val_thresholds[val_hs_idx]
+print(f"\n[Validation] Screening threshold for target Sens ≥ {TARGET_SENS}: {hs_threshold:.3f}")
+print(f"  On validation: Sensitivity = {val_tpr[val_hs_idx]:.4f}, "
+      f"Specificity = {1 - val_fpr[val_hs_idx]:.4f}")
+
+# ── ROC Curve + reporting on TEST ─────────────────────────────────────
+# AUC is threshold-independent and is the headline metric for the paper.
+fpr, tpr, roc_thresholds = roc_curve(conc_true, conc_probs)
+roc_auc = roc_auc_score(conc_true, conc_probs)
+print(f"\nConcerning AUC-ROC (test): {roc_auc:.4f}")
+
+# Apply the VAL-SELECTED threshold to the held-out TEST set and report it.
+screen_pred = (conc_probs >= hs_threshold).astype(int)
+screen_sensitivity = recall_score(conc_true, screen_pred)
+screen_specificity = recall_score(1 - conc_true, 1 - screen_pred)
+print(f"[Test @ val-selected thr={hs_threshold:.3f}] "
+      f"Sensitivity = {screen_sensitivity:.4f}, Specificity = {screen_specificity:.4f}")
+
+# ── Post-hoc temperature scaling (Run 1 calibration / reliability) ────
+# Fit a single scalar T on the VALIDATION set by minimizing NLL, then apply
+# it to test. Temperature scaling is MONOTONIC, so it does not change AUC or
+# the val-threshold Sens/Spec above — its only job is to make the predicted
+# probabilities trustworthy (lower ECE) and produce a reliability diagram.
+from scipy.optimize import minimize_scalar
+
+def _softmax_over_T(logits, T):
+    z = logits / T
+    z = z - z.max(axis=1, keepdims=True)
+    e = np.exp(z)
+    return e / e.sum(axis=1, keepdims=True)
+
+def _nll(T, logits, y_int):
+    p = np.clip(_softmax_over_T(logits, T), 1e-7, 1.0)
+    return -np.mean(np.log(p[np.arange(len(y_int)), y_int]))
+
+def _ece(probs2, y_int, n_bins=10):
+    conf = probs2.max(axis=1); pred = probs2.argmax(axis=1)
+    acc  = (pred == y_int).astype(float)
+    bins = np.linspace(0, 1, n_bins + 1); ece = 0.0
+    for i in range(n_bins):
+        m = (conf > bins[i]) & (conf <= bins[i + 1])
+        if m.sum() > 0:
+            ece += m.mean() * abs(acc[m].mean() - conf[m].mean())
+    return ece
+
+def _reliability(probs2, y_int, n_bins=10):
+    conf = probs2.max(axis=1); pred = probs2.argmax(axis=1)
+    acc  = (pred == y_int).astype(float)
+    bins = np.linspace(0, 1, n_bins + 1); xs, ys = [], []
+    for i in range(n_bins):
+        m = (conf > bins[i]) & (conf <= bins[i + 1])
+        if m.sum() > 0:
+            xs.append(conf[m].mean()); ys.append(acc[m].mean())
+    return xs, ys
+
+# Pseudo-logits from softmax outputs (log p — defined up to a constant, fine for a single T).
+val_probs2  = np.column_stack([1 - val_conc_probs, val_conc_probs])
+test_probs2 = pred_probs
+val_logits  = np.log(np.clip(val_probs2,  1e-7, 1.0))
+test_logits = np.log(np.clip(test_probs2, 1e-7, 1.0))
+
+opt   = minimize_scalar(_nll, bounds=(0.05, 10.0), method='bounded',
+                        args=(val_logits, val_true))
+T_opt = opt.x
+test_probs2_cal = _softmax_over_T(test_logits, T_opt)
+ece_before = _ece(test_probs2,     true_labels)
+ece_after  = _ece(test_probs2_cal, true_labels)
+print(f"\n[Temperature scaling] Optimal T (fit on val): {T_opt:.3f}")
+print(f"  Test ECE before: {ece_before:.4f}  →  after: {ece_after:.4f}")
+print(f"  (AUC and val-threshold Sens/Spec unchanged — scaling is monotonic.)")
+
+plt.figure(figsize=(6, 6))
+plt.plot([0, 1], [0, 1], 'k--', label='Perfect calibration')
+xb, yb = _reliability(test_probs2,     true_labels)
+xa, ya = _reliability(test_probs2_cal, true_labels)
+plt.plot(xb, yb, 'o-', color='crimson',   label=f'Before (ECE={ece_before:.3f})')
+plt.plot(xa, ya, 's-', color='steelblue', label=f'After T={T_opt:.2f} (ECE={ece_after:.3f})')
+plt.xlabel('Mean predicted confidence'); plt.ylabel('Empirical accuracy')
+plt.title('Reliability Diagram — Temperature Scaling')
+plt.legend(); plt.grid(alpha=0.3); plt.tight_layout()
 plt.show()
 
-# === 3. Training Curves ===
-plt.figure() # Creates a blank canvas
-# Plots how accuracy on training data changed over 10 epochs
-plt.plot(history.history['accuracy'], label='Train Accuracy') 
-# Plots how accuracy on the unseen test data changed over 10 epochs
+# Default argmax (0.5) point on the test curve, for comparison.
+def_idx = np.argmin(np.abs(roc_thresholds - 0.5))
+
+plt.figure(figsize=(7, 6))
+plt.plot(fpr, tpr, color='crimson', lw=2, label=f'Concerning ROC (AUC = {roc_auc:.3f})')
+plt.plot([0, 1], [0, 1], color='gray', linestyle='--', label='Random classifier')
+plt.scatter(fpr[def_idx], tpr[def_idx], color='black', zorder=5,
+            label=f'argmax 0.5 (Sens={tpr[def_idx]:.2f}, Spec={1-fpr[def_idx]:.2f})')
+plt.scatter(1 - screen_specificity, screen_sensitivity, color='blue', marker='D', zorder=5,
+            label=f'Val-selected thr={hs_threshold:.2f} (Sens={screen_sensitivity:.2f}, Spec={screen_specificity:.2f})')
+plt.xlabel('False Positive Rate (1 - Specificity)')
+plt.ylabel('True Positive Rate (Sensitivity)')
+plt.title('ROC Curve — Concerning Detection')
+plt.legend(loc='lower right')
+plt.grid(alpha=0.3)
+plt.tight_layout()
+plt.show()
+
+cm = confusion_matrix(true_labels, pred_labels)
+disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=GROUP_ORDER)
+disp.plot(xticks_rotation=45)
+plt.title("Confusion Matrix — Binary Clinical Model")
+plt.show()
+
+plt.figure()
+plt.plot(history.history['accuracy'], label='Train Accuracy')
 plt.plot(history.history['val_accuracy'], label='Val Accuracy')
-plt.title('Model Accuracy')
+plt.plot(history.history['val_balanced_acc'], label='Val Balanced Acc')
+plt.title('Model Accuracy — Binary Clinical Model')
 plt.xlabel('Epoch')
 plt.ylabel('Accuracy')
 plt.legend()
 plt.grid()
 plt.show()
 
-# This does the exact same thing as the accuracy graph, but for Loss (the error rate).
-# If Train Accuracy goes up, but Val Accuracy flatlines or goes down, 
-# your model is memorizing the training images instead of actually learning how to spot cancer.
-# Ideally, the "Train" line and "Val" line should stay close together as they move up (for accuracy) or down (for loss)
 plt.figure()
 plt.plot(history.history['loss'], label='Train Loss')
 plt.plot(history.history['val_loss'], label='Val Loss')
-plt.title('Model Loss')
+plt.title('Model Loss — Binary Clinical Model')
 plt.xlabel('Epoch')
 plt.ylabel('Loss')
 plt.legend()
 plt.grid()
 plt.show()
 
+# %%
+# Reuse predictions already computed in Extended Evaluation (avoids redundant predict call)
+y_true = true_labels
+y_pred_probs = pred_probs
+y_pred_default = pred_labels   # argmax (0.5) — the primary prediction
 
-#%%
-# ==========================
-# Grad-CAM Visualization
-# ==========================
+# Generate normalized confusion matrix (shows percentages instead of raw counts)
+cm_norm = confusion_matrix(y_true, y_pred_default, normalize='true')
 
-# Select an image from the validation set
-# We need a specific picture to test the visualization on.
-img_path = test_df['path'].iloc[0]  # You can change this to view other images
-img_size = (IMG_SIZE, IMG_SIZE)
-
-# Load and preprocess image
-def load_image(img_path):
-    # Reads the image file from hard drive and forces it to be 128x128 pixels.
-    # model was strictly built to only accept 128x128 images.
-    img = tf.keras.utils.load_img(img_path, target_size=img_size)
-    # Converts the image into a 3D array (height, width, channels) and adds a 4th dimension for batch size.
-    # Neural networks cannot read image files; they can only read arrays of numbers representing colors (Red, Green, Blue).
-    img_array = tf.keras.utils.img_to_array(img)
-    # Wraps the image array inside another array. This is because the model expects a batch of images, even if it's just one image.
-    # adds a 4th dimension for batch size. [128, 128, 3] -> [1, 128, 128, 3]
-    img_array = np.expand_dims(img_array, axis=0)
-    img_array = img_array / 255.0
-    return img_array, img
-
-# gets the preprocessed image array and the original image for visualization
-img_array, original_img = load_image(img_path)
-
-# Grad-CAM function
-# The original model only outputs probabilities. 
-# Grad-CAM needs to see what the last Conv2D layer was "seeing" at the same time as the final prediction
-def make_gradcam_heatmap(img_array, model, last_conv_layer_name, pred_index=None):
-    # Creates a new model by specifying what goes in and what comes out
-    # a new model that takes the same input as the original model but outputs the activations of the last convolutional layer and the final predictions.
-    grad_model = tf.keras.models.Model([model.inputs], [model.get_layer(last_conv_layer_name).output, model.output])
-    # Starts a recording session. 
-    # Every mathematical operation that happens inside this block is logged so TensorFlow can later work backwards and calculate slopes (gradients).
-    # Gradients tell us "how much did this number affect the final result?" Without the recorder, we would have no idea which pixels were important for the model's decision.
-    with tf.GradientTape() as tape:
-        # What the last Conv2D layer produced, and what the model predicted
-        # how much did conv_outputs contribute to predictions?
-        conv_outputs, predictions = grad_model(img_array)
-        # automatically picks the class the model is most confident about.
-        if pred_index is None:
-            pred_index = tf.argmax(predictions[0])
-        class_channel = predictions[:, pred_index]
-    # tape.gradient() calculates the slope of the class score with respect to the feature map activations.
-    # tape.gradient(input, output) computes the gradient of the output with respect to the input.
-    grads = tape.gradient(class_channel, conv_outputs)
-    pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2))
-    conv_outputs = conv_outputs[0]
-    heatmap = conv_outputs @ pooled_grads[..., tf.newaxis]
-    heatmap = tf.squeeze(heatmap)
-    heatmap = tf.maximum(heatmap, 0)
-    max_val = tf.math.reduce_max(heatmap)
-    heatmap = heatmap / (max_val + tf.keras.backend.epsilon())
-    return heatmap.numpy()
-
-# Get heatmap and overlay
-# last_conv_layer_name = "conv2d_2"  Update this if needed based on model.summary() not optimal
-
-last_conv_layer_name = next(l.name for l in reversed(model.layers) if isinstance(l, tf.keras.layers.Conv2D))
-heatmap = make_gradcam_heatmap(img_array, model, last_conv_layer_name)
-
-def overlay_heatmap(heatmap, img, alpha=0.4):
-    heatmap = cv2.resize(heatmap, (img.size[0], img.size[1]))
-    heatmap = np.uint8(255 * heatmap)
-    heatmap_color = cv2.cvtColor(cv2.applyColorMap(heatmap, cv2.COLORMAP_JET), cv2.COLOR_BGR2RGB)
-    img = np.array(img)
-    overlay = cv2.addWeighted(img, 1 - alpha, heatmap_color, alpha, 0)
-    return overlay
-
-overlay_img = overlay_heatmap(heatmap, original_img)
-
-# Show Grad-CAM result
-plt.figure(figsize=(6, 6))
-plt.imshow(overlay_img)
-plt.title("Grad-CAM Heatmap")
-plt.axis('off')
+plt.figure(figsize=(7, 6))
+sns.heatmap(cm_norm, annot=True, fmt='.2%', cmap='Reds',
+            xticklabels=GROUP_ORDER, yticklabels=GROUP_ORDER)
+plt.title('Normalized Confusion Matrix (Row sums to 100%)')
+plt.ylabel('True Clinical Group')
+plt.xlabel('Predicted Clinical Group')
 plt.show()
 
+#%%
+# conc_probs already computed in Extended Evaluation — reuse directly
+probs_true_concerning = conc_probs[y_true == CONCERNING_IDX]
+probs_true_benign     = conc_probs[y_true == 0]   # Benign = index 0
+
+plt.figure(figsize=(10, 5))
+plt.hist(probs_true_benign, bins=50, alpha=0.5, label='Actual Benign', color='green', density=True)
+plt.hist(probs_true_concerning, bins=50, alpha=0.5, label='Actual Concerning', color='red', density=True)
+plt.axvline(x=0.5, color='black', linestyle='--', label='argmax threshold (0.5)')
+plt.axvline(x=hs_threshold, color='blue', linestyle=':', alpha=0.8,
+            label=f'Screening threshold ({hs_threshold:.2f})')
+plt.title('How confident is the model that an image is Concerning?')
+plt.xlabel('Predicted Probability of being Concerning')
+plt.ylabel('Density of Images')
+plt.legend()
+plt.show()
 # %%
