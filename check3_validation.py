@@ -16,26 +16,19 @@ import tensorflow as tf
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder
 from sklearn.metrics import roc_curve, roc_auc_score, recall_score
-from tensorflow.keras.preprocessing.image import ImageDataGenerator
+from tensorflow.keras.preprocessing.image import load_img, img_to_array
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 script_dir    = os.path.dirname(os.path.abspath(__file__))
 metadata_path = os.path.join(script_dir, 'data', 'HAM10000_metadata.csv')
 images_path_1 = os.path.join(script_dir, 'data', 'HAM10000_images_part_1')
 images_path_2 = os.path.join(script_dir, 'data', 'HAM10000_images_part_2')
-model_path    = os.path.join(script_dir, 'best_model_run2_color.h5')
+model_path    = os.path.join(script_dir, 'best_model_run4_meta.h5')
 
-# ── MUST match the run's training preprocessing ──────────────────────────────
-# Run 0/1 → USE_COLOR_CONSTANCY = False ; Run 2+ → True. (Mismatch = garbage scores.)
-USE_COLOR_CONSTANCY = True
-
-def shades_of_gray(img, power=6):
-    img = img.astype('float32')
-    illum = np.power(np.mean(np.power(img, power), axis=(0, 1)), 1.0 / power)
-    illum = illum / (np.sqrt(np.sum(illum ** 2)) + 1e-6) * np.sqrt(3.0)
-    img = img / (illum + 1e-6)
-    img = np.clip(img, 0, 255)
-    return img / 255.0
+# ── Run 4: two-input model ([image, metadata]) on plain rescale=1./255 ───────
+# Run 4 fuses patient metadata (age/sex/localization) with the image branch, so
+# scoring must feed BOTH inputs. The metadata encoder is re-fit on the SAME train
+# split (random_state=42) so its stats/vocabularies match training exactly.
 
 CLINICAL_GROUPS = {
     'nv': 'Benign', 'bkl': 'Benign', 'df': 'Benign', 'vasc': 'Benign',
@@ -128,31 +121,49 @@ print("\n" + "=" * 55)
 print("CHECK 3B — Per-diagnosis recall within Concerning")
 print("=" * 55)
 
-if USE_COLOR_CONSTANCY:
-    datagen = ImageDataGenerator(rescale=None, preprocessing_function=shades_of_gray)
-else:
-    datagen = ImageDataGenerator(rescale=1./255)
-test_gen = datagen.flow_from_dataframe(
-    test_df, x_col='path', y_col='group',
-    target_size=(IMG_SIZE, IMG_SIZE), batch_size=BATCH_SIZE,
-    classes=GROUP_ORDER, class_mode='categorical', shuffle=False
-)
-val_gen = datagen.flow_from_dataframe(
-    val_df, x_col='path', y_col='group',
-    target_size=(IMG_SIZE, IMG_SIZE), batch_size=BATCH_SIZE,
-    classes=GROUP_ORDER, class_mode='categorical', shuffle=False
-)
+# ── Metadata encoder (re-fit on TRAIN only — identical to model.py) ───────────
+def fit_metadata_encoder(train_df):
+    age_median = float(train_df['age'].median())
+    age_filled = train_df['age'].fillna(age_median)
+    return {
+        'age_median': age_median,
+        'age_mean':   float(age_filled.mean()),
+        'age_std':    float(age_filled.std() + 1e-6),
+        'sex_cats':   sorted(train_df['sex'].dropna().unique().tolist()),
+        'loc_cats':   sorted(train_df['localization'].dropna().unique().tolist()),
+    }
+
+def transform_metadata(df, enc):
+    age   = df['age'].fillna(enc['age_median'])
+    age_z = ((age - enc['age_mean']) / enc['age_std']).to_numpy(dtype='float32').reshape(-1, 1)
+    sex_oh = np.stack([(df['sex'] == c).to_numpy(dtype='float32') for c in enc['sex_cats']], axis=1)
+    loc_oh = np.stack([(df['localization'] == c).to_numpy(dtype='float32') for c in enc['loc_cats']], axis=1)
+    return np.concatenate([age_z, sex_oh, loc_oh], axis=1).astype('float32')
+
+meta_encoder = fit_metadata_encoder(train_df)
+meta_val  = transform_metadata(val_df,  meta_encoder)
+meta_test = transform_metadata(test_df, meta_encoder)
+
+def predict_with_meta(model, df, meta, img_size=IMG_SIZE, batch_size=BATCH_SIZE):
+    """Batched two-input predict; rows stay in df order so probs align with df labels."""
+    n, paths = len(df), df['path'].tolist()
+    probs = np.zeros((n, len(GROUP_ORDER)), dtype='float32')
+    for start in range(0, n, batch_size):
+        end = min(start + batch_size, n)
+        X_img = np.zeros((end - start, img_size, img_size, 3), dtype='float32')
+        for j, idx in enumerate(range(start, end)):
+            X_img[j] = img_to_array(load_img(paths[idx], target_size=(img_size, img_size))) / 255.0
+        probs[start:end] = model.predict([X_img, meta[start:end]], verbose=0)
+    return probs
 
 print("\nLoading model …")
 model = tf.keras.models.load_model(model_path, compile=False)
 
-val_gen.reset()
-val_probs = model.predict(val_gen, verbose=1)[:, CONCERNING_IDX]
-val_true  = np.array(val_gen.classes)
+val_probs  = predict_with_meta(model, val_df,  meta_val)[:,  CONCERNING_IDX]
+val_true   = val_df['group_label'].to_numpy()
 
-test_gen.reset()
-test_probs = model.predict(test_gen, verbose=1)[:, CONCERNING_IDX]
-test_true  = np.array(test_gen.classes)
+test_probs = predict_with_meta(model, test_df, meta_test)[:, CONCERNING_IDX]
+test_true  = test_df['group_label'].to_numpy()
 
 # Val-selected screening threshold
 val_fpr, val_tpr, val_thr = roc_curve((val_true == CONCERNING_IDX).astype(int), val_probs)

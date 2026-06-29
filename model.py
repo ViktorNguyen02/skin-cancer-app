@@ -44,7 +44,8 @@ from tensorflow.keras.layers import (Conv2D, MaxPooling2D, Dense, Dropout, Input
                                       BatchNormalization, GlobalAveragePooling2D,
                                       Activation, Add, Multiply, Reshape, Concatenate)
 from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint, ReduceLROnPlateau
-from tensorflow.keras.preprocessing.image import ImageDataGenerator
+from tensorflow.keras.preprocessing.image import ImageDataGenerator, load_img, img_to_array
+from tensorflow.keras.utils import Sequence, to_categorical
 import tensorflow as tf
 from sklearn.metrics import (classification_report, confusion_matrix,
                               ConfusionMatrixDisplay, f1_score,
@@ -317,38 +318,72 @@ print("\nFocal loss ready (Run 1: gamma=1.5, label_smoothing=0.05).")
 
 #%%
 # ======================================================
-# Data Generators
+# Run 4 — Metadata encoding (age / sex / localization)
 # ======================================================
+# Run 4's contribution: fuse the patient metadata HAM10000 already ships with
+# (age, sex, localization) into the network. Two image-only runs (colour
+# constancy, MixUp) both failed to resolve the bkl↔akiec confusion because the
+# discriminating signal is NOT in the pixels — it is clinical context:
+#   • akiec (actinic keratosis) overwhelmingly occurs on sun-exposed sites
+#     (face, neck, hands/forearms) in OLDER patients.
+#   • bkl (seborrheic keratosis) is common on the TRUNK across a wider age range.
+# Localization + age separate them in a way colour/texture cannot.
+#
+# LEAK SAFETY: every statistic (age median/mean/std, the category vocabularies)
+# is fit on the TRAIN split ONLY, then applied unchanged to val/test. Categories
+# unseen in train map to all-zeros (handle_unknown by construction).
+
+def fit_metadata_encoder(train_df):
+    """Learn imputation/standardization stats and category vocabularies — TRAIN ONLY."""
+    age_median = float(train_df['age'].median())
+    age_filled = train_df['age'].fillna(age_median)
+    enc = {
+        'age_median': age_median,
+        'age_mean':   float(age_filled.mean()),
+        'age_std':    float(age_filled.std() + 1e-6),
+        'sex_cats':   sorted(train_df['sex'].dropna().unique().tolist()),
+        'loc_cats':   sorted(train_df['localization'].dropna().unique().tolist()),
+    }
+    return enc
+
+def transform_metadata(df, enc):
+    """Encode age (impute+standardize) + one-hot sex + one-hot localization → fixed-width float32."""
+    age   = df['age'].fillna(enc['age_median'])
+    age_z = ((age - enc['age_mean']) / enc['age_std']).to_numpy(dtype='float32').reshape(-1, 1)
+    sex_oh = np.stack([(df['sex'] == c).to_numpy(dtype='float32') for c in enc['sex_cats']], axis=1)
+    loc_oh = np.stack([(df['localization'] == c).to_numpy(dtype='float32') for c in enc['loc_cats']], axis=1)
+    return np.concatenate([age_z, sex_oh, loc_oh], axis=1).astype('float32')
+
+meta_encoder = fit_metadata_encoder(train_df_balanced)
+meta_train = transform_metadata(train_df_balanced, meta_encoder)
+meta_val   = transform_metadata(val_df,            meta_encoder)
+meta_test  = transform_metadata(test_df,           meta_encoder)
+META_DIM   = meta_train.shape[1]
+
+print(f"\nMetadata encoder (fit on TRAIN only):")
+print(f"  age: median={meta_encoder['age_median']:.1f}, "
+      f"mean={meta_encoder['age_mean']:.1f}, std={meta_encoder['age_std']:.1f}")
+print(f"  sex categories ({len(meta_encoder['sex_cats'])}): {meta_encoder['sex_cats']}")
+print(f"  localization categories ({len(meta_encoder['loc_cats'])}): {meta_encoder['loc_cats']}")
+print(f"  → metadata vector width: {META_DIM}")
+
+
+#%%
+# ======================================================
+# Data Generators — two-input ([image, metadata], label)
+# ======================================================
+# flow_from_dataframe yields image-only batches, so Run 4 replaces it with a
+# custom Sequence that yields ([image_batch, meta_batch], y_batch). The image
+# pipeline is UNCHANGED from Run 1: the same ImageDataGenerator augmentation +
+# rescale are reused via .random_transform()/.standardize(), so the only new
+# thing is the aligned metadata branch.
 
 IMG_SIZE = 224
 BATCH_SIZE = 32
 
-# ── Run 2: Colour constancy (Shades-of-Gray, Minkowski p=6) ───────────
-# HAM10000 images come from multiple sources with different illumination /
-# white-balance. The model otherwise keys on ABSOLUTE colour, which drifts
-# between sources — this is a major driver of the bkl↔akiec confusion, since
-# both share brown/tan pigment and the model cannot tell "tan because akiec"
-# from "tan because of the camera/light". Shades-of-Gray estimates the scene
-# illuminant per channel and divides it out, so every image is rendered under
-# a canonical neutral light. This makes bkl and akiec separable on their TRUE
-# colour/texture rather than on illumination artefacts.
-#
-# Applied identically to train / val / test (must match — a model trained on
-# colour-normalised images must be evaluated on colour-normalised images).
-# The function returns a [0,1] image, so rescale is set to None (no /255).
-def shades_of_gray(img, power=6):
-    img = img.astype('float32')
-    # Per-channel Minkowski p-norm mean = the illuminant estimate.
-    illum = np.power(np.mean(np.power(img, power), axis=(0, 1)), 1.0 / power)
-    # Normalise illuminant to a unit vector, then to the neutral-grey axis.
-    illum = illum / (np.sqrt(np.sum(illum ** 2)) + 1e-6) * np.sqrt(3.0)
-    img = img / (illum + 1e-6)          # divide the illuminant out
-    img = np.clip(img, 0, 255)
-    return img / 255.0                   # → [0,1]; rescale=None below
-
+# Image augmentation/rescale config carried forward UNCHANGED from the Run 1 champion.
 train_datagen = ImageDataGenerator(
-    rescale=None,                       # Run 2: shades_of_gray already returns [0,1]
-    preprocessing_function=shades_of_gray,
+    rescale=1./255,
     rotation_range=90,              # softened from 180 — extreme rotations injected outlier
     width_shift_range=0.2,          # batches that contributed to the epoch-8 val_loss spike
     height_shift_range=0.2,
@@ -359,55 +394,84 @@ train_datagen = ImageDataGenerator(
     shear_range=0.1,
     fill_mode='nearest'
 )
+test_datagen = ImageDataGenerator(rescale=1./255)
 
-test_datagen = ImageDataGenerator(rescale=None, preprocessing_function=shades_of_gray)
 
-train_generator = train_datagen.flow_from_dataframe(
-    dataframe=train_df_balanced,
-    x_col='path',
-    y_col='group',              # clinical group name column
-    target_size=(IMG_SIZE, IMG_SIZE),
-    batch_size=BATCH_SIZE,
-    classes=GROUP_ORDER,        # ['Benign', 'Concerning']
-    class_mode='categorical',
-    shuffle=True
-)
+class ImageMetaSequence(Sequence):
+    """Yields ([image_batch, meta_batch], y_onehot). Train shuffles + augments;
+    val/test keep order and only rescale (so predictions align with .classes).
 
-# Validation generator — drives all model selection (callbacks) and threshold tuning.
-val_generator = test_datagen.flow_from_dataframe(
-    dataframe=val_df,
-    x_col='path',
-    y_col='group',
-    target_size=(IMG_SIZE, IMG_SIZE),
-    batch_size=BATCH_SIZE,
-    classes=GROUP_ORDER,
-    class_mode='categorical',
-    shuffle=False
-)
+    Reuses the ImageDataGenerator above for the EXACT Run 1 augmentation:
+    random_transform applies the augmentation, standardize applies rescale=1./255.
+    Exposes .classes (in-order labels) and a no-op .reset() so the existing
+    ValMetrics callback and evaluation code work without changes.
+    """
+    def __init__(self, df, meta, datagen, augment, batch_size, img_size, shuffle):
+        self.df         = df.reset_index(drop=True)
+        self.meta       = meta.astype('float32')
+        self.labels     = self.df['group_label'].to_numpy()
+        self.paths      = self.df['path'].tolist()
+        self.datagen    = datagen
+        self.augment    = augment
+        self.batch_size = batch_size
+        self.img_size   = img_size
+        self.shuffle    = shuffle
+        self.class_indices = {g: i for i, g in enumerate(GROUP_ORDER)}
+        self.indices    = np.arange(len(self.df))
+        self.on_epoch_end()
 
-# Test generator — held out, scored exactly once in Extended Evaluation.
-test_generator = test_datagen.flow_from_dataframe(
-    dataframe=test_df,
-    x_col='path',
-    y_col='group',
-    target_size=(IMG_SIZE, IMG_SIZE),
-    batch_size=BATCH_SIZE,
-    classes=GROUP_ORDER,
-    class_mode='categorical',
-    shuffle=False
-)
+    # --- compatibility shims so existing call sites keep working ---
+    @property
+    def classes(self):
+        return self.labels            # val/test never shuffle → predict order matches this
+    def reset(self):
+        pass                          # no-op; predict() iterates the whole Sequence in order
+
+    def __len__(self):
+        return int(np.ceil(len(self.df) / self.batch_size))
+
+    def on_epoch_end(self):
+        if self.shuffle:
+            np.random.shuffle(self.indices)
+
+    def __getitem__(self, i):
+        batch_idx = self.indices[i * self.batch_size:(i + 1) * self.batch_size]
+        X_img = np.zeros((len(batch_idx), self.img_size, self.img_size, 3), dtype='float32')
+        for j, idx in enumerate(batch_idx):
+            img = load_img(self.paths[idx], target_size=(self.img_size, self.img_size))
+            xi  = img_to_array(img)
+            if self.augment:
+                xi = self.datagen.random_transform(xi)
+            xi = self.datagen.standardize(xi)     # applies rescale=1./255
+            X_img[j] = xi
+        X_meta = self.meta[batch_idx]
+        y = to_categorical(self.labels[batch_idx], num_classes=len(GROUP_ORDER))
+        return [X_img, X_meta], y
+
+
+train_generator = ImageMetaSequence(train_df_balanced, meta_train, train_datagen,
+                                    augment=True,  batch_size=BATCH_SIZE,
+                                    img_size=IMG_SIZE, shuffle=True)
+# Validation — drives all model selection (callbacks) and threshold tuning.
+val_generator   = ImageMetaSequence(val_df, meta_val, test_datagen,
+                                    augment=False, batch_size=BATCH_SIZE,
+                                    img_size=IMG_SIZE, shuffle=False)
+# Test — held out, scored exactly once in Extended Evaluation.
+test_generator  = ImageMetaSequence(test_df, meta_test, test_datagen,
+                                    augment=False, batch_size=BATCH_SIZE,
+                                    img_size=IMG_SIZE, shuffle=False)
 
 num_classes = len(train_generator.class_indices)
 print(f"\nClass indices: {train_generator.class_indices}")
-print(f"Steps per epoch: {len(train_generator)}")
+print(f"Steps per epoch: {len(train_generator)}  |  metadata dim: {META_DIM}")
 
 
 #%%
 # ============================================================
-# Build CNN Model — SE-Residual CNN with Multi-Scale Fusion
+# Build CNN Model — SE-Residual CNN + Multi-Scale Fusion + Metadata
 # ============================================================
 # Built FROM SCRATCH (no pretrained weights / no transfer learning). This is
-# the paper's architectural contribution. Three custom mechanisms replace the
+# the paper's architectural contribution. Four custom mechanisms replace the
 # plain 4-block sequential CNN, each chosen to raise the discriminative ceiling
 # (AUC) that a shallow single-scale net could not exceed (~0.867):
 #
@@ -429,8 +493,14 @@ print(f"Steps per epoch: {len(train_generator)}")
 #     final (coarsest) feature map, we GAP-pool the last THREE stages and
 #     concatenate them, so the classifier sees fine texture AND global shape.
 #
+# (4) Metadata fusion (Run 4 — the new mechanism):
+#     A small MLP encodes patient age + one-hot sex/localization into a 16-d
+#     clinical-context embedding, concatenated with the 1152-d image vector
+#     before the head. This injects the non-image signal (age + body site) that
+#     separates bkl from akiec — something the image-only runs could not do.
+#
 # Focal loss, val_auc checkpointing, and the 3-way split are all unchanged —
-# only the feature extractor is replaced.
+# the feature extractor is reused and a metadata branch is added alongside it.
 
 def se_block(x, ratio=16):
     """Squeeze-and-Excitation channel attention (custom, from scratch)."""
@@ -467,10 +537,10 @@ def se_residual_block(x, filters, dropout):
     return f
 
 
-inputs = Input(shape=(IMG_SIZE, IMG_SIZE, 3))
+image_input = Input(shape=(IMG_SIZE, IMG_SIZE, 3), name='image_input')
 
 # Stem: a plain conv to lift 3→32 channels before the residual stages.
-x = Conv2D(32, 3, padding='same')(inputs)
+x = Conv2D(32, 3, padding='same')(image_input)
 x = BatchNormalization()(x)
 x = Activation('relu')(x)
 
@@ -487,15 +557,26 @@ ms = Concatenate()([
     GlobalAveragePooling2D()(s3),   # 256 — finer / mid scale
     GlobalAveragePooling2D()(s4),   # 384 — coarser
     GlobalAveragePooling2D()(s5),   # 512 — coarsest / global
-])                                   # → 1152 features
+])                                   # → 1152 image features
 
-# Classifier head.
-h = Dense(256, activation='relu')(ms)
+# ── Run 4: metadata branch ────────────────────────────────────────────
+# A small MLP encodes the ~20-d metadata vector (age + one-hot sex/localization)
+# into a 16-d clinical-context embedding, concatenated with the 1152-d image
+# vector before the classifier head. Kept deliberately small so the image branch
+# remains the dominant signal and the model cannot simply memorize metadata.
+meta_input = Input(shape=(META_DIM,), name='meta_input')
+m = Dense(32, activation='relu')(meta_input)
+m = Dense(16, activation='relu')(m)
+
+# Fuse image + metadata, then the existing classifier head (unchanged).
+fused = Concatenate()([ms, m])      # → 1152 + 16 = 1168 features
+h = Dense(256, activation='relu')(fused)
 h = BatchNormalization()(h)
 h = Dropout(0.40)(h)
 outputs = Dense(num_classes, activation='softmax')(h)
 
-model = Model(inputs=inputs, outputs=outputs, name='SE_Residual_MultiScale_CNN')
+model = Model(inputs=[image_input, meta_input], outputs=outputs,
+              name='SE_Residual_MultiScale_CNN_Meta')
 
 # LR 3e-4 (lowered from 5e-4): the previous run showed a val_loss spike at
 # epoch 8–9, a sign that 5e-4 sat at the edge of stability with focal loss.
@@ -554,8 +635,9 @@ class ValMetrics(tf.keras.callbacks.Callback):
               f"val_macro_f1: {logs['val_macro_f1']:.4f}")
 
 # Ablation run name — each run saves to its own file so the table is reproducible.
-# Run 2 = Run 1 (gamma=1.5 + label_smoothing=0.05) + Shades-of-Gray colour constancy.
-MODEL_PATH = 'best_model_run2_color.h5'
+# Run 4 = Run 1 (gamma=1.5 + label_smoothing=0.05) + metadata fusion.
+# (Runs 2 colour-constancy and 3 MixUp both rejected — config is back on the Run 1 champion.)
+MODEL_PATH = 'best_model_run4_meta.h5'
 
 callbacks = [
     ValMetrics(val_generator),         # MUST be first — populates logs for the callbacks below
