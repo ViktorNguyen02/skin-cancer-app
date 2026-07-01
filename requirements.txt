@@ -1,15 +1,31 @@
-numpy
-pandas
-scipy
-matplotlib
-seaborn
-plotly
-scikit-learn
+# Skin Lesion Binary CNN — pinned environment for reproducibility
+# Python 3.11.9 (virtualenv: myenv311). Apple Silicon (M4) / macOS.
+#
+# Reproduce:
+#   python3.11 -m venv myenv311 && source myenv311/bin/activate
+#   pip install -r requirements.txt
+#
+# NOTE: TensorFlow on Apple Silicon GPU (Metal) is not bit-for-bit deterministic
+# even with tf.random.set_seed(42); seeds make runs close, not identical. Report
+# multi-seed mean ± std (multiseed_train.py) rather than a single run.
+
+# ── Core ML / analysis stack (pinned — used by model.py, check*, stats_analysis) ──
 tensorflow==2.13.1
 tensorflow-metal==1.2.0
+numpy==1.24.3
+pandas==2.3.3
+scikit-learn==1.9.0
+scipy==1.15.3
+h5py==3.16.0
+pillow==12.2.0
+
+# ── Plotting ──
+matplotlib==3.10.9
+seaborn==0.13.2
+plotly
+
+# ── App / deployment (not needed to reproduce the model or stats) ──
 flask
 opencv-python
 gunicorn
-pillow
-h5py
 xhtml2pdf
