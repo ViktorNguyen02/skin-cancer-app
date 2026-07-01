@@ -16,8 +16,8 @@ point is a **threshold selected on validation** (target Sensitivity ≥ 0.90) th
 | Metric | Acceptable | Strong / competitive |
 |---|---|---|
 | AUC | ≥ 0.85 | **≥ 0.90** (SOTA 0.92–0.95) |
-| Sensitivity @ operating point | ≥ 0.85 | **≥ 0.90–0.95** |
-| Specificity @ that sensitivity | ≥ 0.65 | **≥ 0.80** |
+| Sensitivity @ operating point TP rates | ≥ 0.85 | **≥ 0.90–0.95** |
+| Specificity @ that sensitivity TN rates| ≥ 0.65 | **≥ 0.80** |
 | ECE (calibration error) | < 0.10 | < 0.05 |
 
 Anchor: dermatologist baselines in the literature ≈ 0.86 sens / 0.71 spec.
