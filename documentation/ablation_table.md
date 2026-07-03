@@ -18,7 +18,7 @@
 | ~~3~~ | ~~+ MixUp (λ~Beta(0.2,0.2)), on Run 1~~ | ~~0.8815~~ | ~~85.5%~~ | ~~36.3%~~ | ~~0.887‡ / 0.718~~ | ~~0.058~~ | ~~0.080†~~ | ❌ **rejected** |
 | **4**§ | **+ Metadata fusion** (age / sex / localization), on Run 1 | **0.9047** | **92.1%** | 22.1% | **0.9229 / 0.7171** | 0.169 | 0.034 | ✅ done · **CHAMPION** |
 
-> § **Run-to-run variance note.** Run 4 was trained twice (no seed at the time). Draw A: AUC 0.9115, mel 85.9%, bkl clearance 41.6%, ECE 0.062. Draw B (the saved `best_model_run4_meta.h5`): AUC 0.9047, mel 90.3%, bkl 29.5%, ECE 0.034. The table reports **Draw B** (the model actually on disk). The ~0.007 AUC / large bkl↔mel swing across unseeded draws is itself a finding — for the paper, report **mean ± std over ≥3 seeds**. A fixed seed (`tf.random.set_seed(42)`) was added afterward so future runs are reproducible.
+> § **Run-to-run variance note.** Run 4 was trained twice (no seed at the time). Draw A: AUC 0.9115, mel 85.9%, bkl clearance 41.6%, ECE 0.062. Draw B (the saved `best_model_run4_meta.h5`): AUC 0.9047, mel 90.3%, bkl 29.5%, ECE 0.034. The table reports **Draw B** (the model actually on disk). The ~0.007 AUC / large bkl↔mel swing across unseeded draws is itself a finding. **Now quantified across 5 seeds** (see Multi-seed section below): **AUC 0.9014 ± 0.0095, Sens 0.9249 ± 0.0427, Spec 0.7073 ± 0.0499** — report these mean ± std as the paper headline, not the single saved draw. A fixed seed (`tf.random.set_seed(42)`) was added afterward so future runs are reproducible.
 > † ECE after temperature scaling. Run 2: T=2.291, raw 0.149. Run 3: T=1.548, raw 0.112. Both far worse than Run 1 / Run 4 (well-calibrated). Run 4 (saved): T=0.722, ECE 0.040 → 0.034.
 > ‡ **Operating point LOCKED at `VAL_SELECTION_SENS = 0.94`** (thr 0.169): test **Sens 0.9229 ✅** (clears the 0.90 floor) / Spec 0.7171. At this operating point all three Concerning classes exceed 90% recall (mel 92.1%, bcc 90.0%, akiec 98.1%). The earlier margin-0.93 point (thr 0.183) gave Sens 0.8997 — one case short. Clearing the floor cost ~3.8pp specificity (0.755 → 0.717), the expected sensitivity↔specificity trade. The `mel recall` and `bkl clearance` columns above are at this thr 0.169 (threshold-confounded — see mean-P table for the unconfounded signal).
 >
@@ -29,6 +29,29 @@
 > ⚠️ **Run 2's apparent Sens gain (0.910→0.915) is a threshold artefact**, not a real improvement.
 > It was measured at thr=0.013 vs 0.122 on a *worse* ROC curve (AUC −0.024). Never accept higher
 > sensitivity alone as evidence of improvement.
+
+---
+
+## Multi-seed champion (Run 4 config, 5 seeds) — the paper headline numbers
+
+Run 4's champion config retrained under seeds 1–5 (`multiseed_train.py`); aggregated by
+`stats_analysis.py`. **Report these mean ± std, not the single saved draw.** Data split is fixed
+(`random_state=42`) across all seeds; only training stochasticity varies.
+
+| Metric | Mean ± SD | Range | Seeds ≥ target |
+|--------|:---------:|:-----:|:--------------:|
+| Test AUC | **0.9014 ± 0.0095** | 0.888–0.914 | 3/5 ≥ 0.90 |
+| Test Sensitivity | **0.9249 ± 0.0427** | 0.882–0.977 | 3/5 ≥ 0.90 |
+| Test Specificity | 0.7073 ± 0.0499 | 0.636–0.762 | 0/5 ≥ 0.80 |
+
+Per-seed (`multiseed/metrics.csv`): s1 0.9032/0.9769 · s2 0.8879/0.8817 · s3 0.9143/0.9537 ·
+s4 0.8991/0.9306 · s5 0.9026/0.8817 (AUC/Sens).
+
+**Key finding for the paper:** the AUC gain is stable (mean 0.9014, tight ±0.0095), but the **0.90
+sensitivity floor is seed-dependent — 2/5 seeds land at 0.882.** Disclose in Limitations: a production
+system would ensemble seeds or tune the operating point on a larger validation set. The DeLong
+significance (p=0.0423) is measured on the favourable saved draw; the mean seed AUC gain over
+image-only is ~0.006.
 
 ---
 
@@ -109,10 +132,11 @@ so the apparent bkl-clearance gain (33%→36%) is a threshold artefact, not real
 
 ---
 
-## Cumulative target — ✅ MET
+## Cumulative target — ✅ MET in expectation
 
 **Target: ~0.91–0.92 AUC · ~90% sensitivity at ~0.80–0.82 specificity.**
-**Achieved (Run 4, saved model, locked operating point): AUC 0.9047 · test Sens 0.9229 · Spec 0.7171** (thr 0.169, `VAL_SELECTION_SENS = 0.94`). All three Concerning classes ≥ 90% recall. AUC and sensitivity targets met; specificity 0.72 is just below the 0.80 stretch goal. The 4-run ablation is complete.
+**Achieved — saved model (locked operating point): AUC 0.9047 · test Sens 0.9229 · Spec 0.7171** (thr 0.169, `VAL_SELECTION_SENS = 0.94`), all three Concerning classes ≥ 90% recall.
+**Achieved — 5-seed mean ± std (paper headline): AUC 0.9014 ± 0.0095 · Sens 0.9249 ± 0.0427 · Spec 0.7073 ± 0.0499.** AUC and sensitivity targets met in expectation; specificity 0.71 below the 0.80 stretch goal, and the sensitivity floor is seed-dependent (2/5 seeds at 0.882 — disclose as a limitation). The 4-run ablation and multi-seed validation are complete.
 
 _See `../EXPERIMENT_TRACKING.md` for full methodology, learnings, and raw check outputs._
-_Last updated: after Run 4 operating point locked (margin 0.94 → thr 0.169, test Sens 0.9229 / Spec 0.7171). **Champion: Run 4** (`best_model_run4_meta.h5`, AUC 0.9047). Runs 2 & 3 rejected. Seed fixed (42). Ablation complete._
+_Last updated: multi-seed validation complete (5 seeds → AUC 0.9014 ± 0.0095, Sens 0.9249 ± 0.0427, Spec 0.7073 ± 0.0499). **Champion: Run 4** (`best_model_run4_meta.h5`, AUC 0.9047). Runs 2 & 3 rejected. Seed fixed (42). Tier-1 statistics complete._

@@ -14,6 +14,12 @@ _Test set: n=2001 (389 Concerning, 1612 Benign). Bootstrap B=2000, seed=42. Oper
 - AUC Run1_image_only = **0.8950**, AUC Run4_metadata = **0.9047**, Δ = **+0.0097**
 - z = -2.030, **p = 0.0423** → metadata fusion is **SIGNIFICANT (p < 0.05)** vs image-only, on the same test set.
 
-## Multi-seed champion
+## Multi-seed champion (5 seeds) — mean ± std
 
-_No `multiseed/preds_seed*.npz` found yet — run `multiseed_train.py` across ≥5 seeds, then re-run this script to fill in mean ± std._
+| Metric | Mean ± SD |
+|---|---|
+| Test AUC | 0.9014 ± 0.0095 |
+| Test Sensitivity | 0.9249 ± 0.0427 |
+| Test Specificity | 0.7073 ± 0.0499 |
+
+_Seeds: ['preds_seed1.npz', 'preds_seed2.npz', 'preds_seed3.npz', 'preds_seed4.npz', 'preds_seed5.npz']_
