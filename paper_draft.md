@@ -10,11 +10,11 @@ _Keywords: skin lesion classification; convolutional neural network; squeeze-and
 
 ### 1.1. Motivation
 
-Skin cancer represents one of the most commonly diagnosed malignancies globally, with incidence rates continuing to rise across multiple regions. Early and accurate classification of skin lesions is critical: delayed or incorrect diagnosis, particularly in high-risk conditions such as malignant melanoma, can substantially worsen patient outcomes. Traditional diagnosis relies heavily on visual inspection by skilled dermatologists, a procedure that is inherently subject to inter-observer variability, fatigue, and resource constraints. Diagnostic delays are especially severe in areas with restricted access to specialists.
+Skin cancer represents one of the most commonly diagnosed malignancies globally, with incidence rates continuing to rise across multiple regions [ADDED: 11]. Early and accurate classification of skin lesions is critical: delayed or incorrect diagnosis, particularly in high-risk conditions such as malignant melanoma, can substantially worsen patient outcomes [ADDED: 12]. Traditional diagnosis relies heavily on visual inspection by skilled dermatologists, a procedure that is inherently subject to inter-observer variability, fatigue, and resource constraints [ADDED: 13]. Diagnostic delays are especially severe in areas with restricted access to specialists.
 
-Artificial intelligence, and convolutional neural networks (CNNs) in particular, has emerged as a promising adjunct to clinical dermatology. Landmark work demonstrated that deep learning models could match board-certified dermatologists on lesion classification from dermoscopic images [10], establishing automated systems as a credible diagnostic tool. Subsequent research has rapidly advanced performance through progressively deeper architectures and attention mechanisms — almost universally by fine-tuning networks pretrained on large natural-image datasets such as ImageNet. This transfer-learning paradigm delivers strong empirical results but leaves an important question unanswered: what can a well-designed architecture achieve when trained entirely from scratch, without inheriting representations from a different domain?
+Artificial intelligence, and convolutional neural networks (CNNs) in particular, has emerged as a promising adjunct to clinical dermatology. Landmark work demonstrated that deep learning models could match board-certified dermatologists on lesion classification from dermoscopic images [10], establishing automated systems as a credible diagnostic tool. Subsequent research has rapidly advanced performance through progressively deeper architectures and attention mechanisms — almost universally by fine-tuning networks pretrained on large natural-image datasets such as ImageNet [ADDED: 14], [ADDED: 15], [ADDED: 16]. This transfer-learning paradigm delivers strong empirical results but leaves an important question unanswered: what can a well-designed architecture achieve when trained entirely from scratch, without inheriting representations from a different domain?
 
-A further gap concerns the use of structured clinical context. Patient age, sex, and anatomical site are routinely documented at the point of care and are diagnostically informative — actinic keratosis, for example, occurs predominantly on sun-exposed sites in older patients, in a pattern that colour and texture alone cannot capture. Yet the majority of published skin-lesion classifiers discard this metadata entirely, treating the task as a pure image-classification problem. Finally, many published results lack lesion-level data integrity guarantees — image-level splits allow near-duplicate acquisitions of the same lesion to appear in both training and evaluation sets, inflating metrics — and omit statistical uncertainty quantification, making headline figures difficult to interpret or compare.
+A further gap concerns the use of structured clinical context. Patient age, sex, and anatomical site are routinely documented at the point of care and are diagnostically informative — actinic keratosis, for example, occurs predominantly on sun-exposed sites in older patients [ADDED: 17], in a pattern that colour and texture alone cannot capture. Yet the majority of published skin-lesion classifiers discard this metadata entirely, treating the task as a pure image-classification problem [ADDED: 18], [ADDED: 19]. Finally, many published results lack lesion-level data integrity guarantees — image-level splits allow near-duplicate acquisitions of the same lesion to appear in both training and evaluation sets, inflating metrics [ADDED: 20] — and omit statistical uncertainty quantification, making headline figures difficult to interpret or compare.
 
 ### 1.2. Objective Statement
 
@@ -63,13 +63,13 @@ The seven diagnostic labels were collapsed into two clinically motivated groups 
 * **Concerning** (warrants follow-up / biopsy): melanoma, basal cell carcinoma, and actinic keratosis (mel, bcc, akiec).
 * **Benign** (routine monitoring): melanocytic nevi, benign keratosis-like lesions, dermatofibroma, and vascular lesions (nv, bkl, df, vasc).
 
-Actinic keratosis was assigned to the **Concerning** group because it is a pre-malignant lesion that can progress to squamous cell carcinoma; it clinically warrants follow-up rather than routine dismissal, and therefore belongs with the lesions the model is intended to flag.
+Actinic keratosis was assigned to the **Concerning** group because it is a pre-malignant lesion that can progress to squamous cell carcinoma [ADDED: 17]; it clinically warrants follow-up rather than routine dismissal, and therefore belongs with the lesions the model is intended to flag.
 
 Under the binary mapping the dataset exhibits an approximately 4.1 : 1 class imbalance (Benign ≈ 8,061 images versus Concerning ≈ 1,954). Labels were integer-encoded alphabetically, so that **Benign = 0** and **Concerning = 1**; the Concerning class is treated throughout as the clinical positive class. The rationale for adopting a binary rather than a finer-grained formulation is discussed in Section 5.
 
 ### 3.3. Leak-Free Lesion-Level Split
 
-Because a single lesion contributes several near-duplicate images, splitting at the image level allows acquisitions of the *same* lesion to appear in both training and evaluation, inflating every reported metric. All partitioning was therefore performed at the level of `lesion_id`, guaranteeing that every image of a given lesion resides in exactly one split.
+Because a single lesion contributes several near-duplicate images [ADDED: 1], splitting at the image level allows acquisitions of the *same* lesion to appear in both training and evaluation, inflating every reported metric. All partitioning was therefore performed at the level of `lesion_id`, guaranteeing that every image of a given lesion resides in exactly one split.
 
 We used a two-stage stratified split, keyed on `lesion_id` and stratified by the binary group label, with a fixed random seed (`random_state = 42`) for reproducibility:
 
@@ -99,7 +99,7 @@ The SE gate (`se_block`) implements channel attention as global average pooling 
 
 **Metadata fusion** distinguishes the champion model. The patient metadata is encoded as a fixed-width vector — standardized age concatenated with one-hot encodings of sex and localization (≈ 20 dimensions) — and passed through a small multilayer perceptron (Dense(32, ReLU) → Dense(16, ReLU)) to yield a 16-dimensional clinical-context embedding. This embedding is concatenated with the 1,152-dimensional image descriptor (≈ 1,168 features) before the classifier head. The metadata branch is kept deliberately small so that the image branch remains the dominant signal and the network cannot simply memorize metadata. The head is Dense(256, ReLU) → batch normalization → Dropout(0.40) → Dense(2, softmax).
 
-The rationale for each mechanism is as follows. **Residual connections** [3] keep gradients healthy and thereby permit greater depth (five stages) than a from-scratch plain CNN can typically train without a vanishing-gradient stall. **SE attention** allows the network to emphasize channels encoding concerning markers (colour asymmetry, irregular borders, atypical vasculature) and to suppress irrelevant ones at roughly 1% additional parameters. **Multi-scale fusion** lets the classifier see both fine and coarse features. **Metadata fusion** injects a non-image signal that pixel-based models cannot access: actinic keratosis (akiec) occurs predominantly on sun-exposed sites (face, neck, hands/forearms) in older patients, whereas benign keratosis (bkl) is common on the trunk across a wider age range — so age and localization separate these confusable classes in a way colour and texture cannot.
+The rationale for each mechanism is as follows. **Residual connections** [3] keep gradients healthy and thereby permit greater depth (five stages) than a from-scratch plain CNN can typically train without a vanishing-gradient stall. **SE attention** allows the network to emphasize channels encoding concerning markers (colour asymmetry, irregular borders, atypical vasculature) and to suppress irrelevant ones at roughly 1% additional parameters [ADDED: 2]. **Multi-scale fusion** lets the classifier see both fine and coarse features. **Metadata fusion** injects a non-image signal that pixel-based models cannot access: actinic keratosis (akiec) occurs predominantly on sun-exposed sites (face, neck, hands/forearms) in older patients, whereas benign keratosis (bkl) is common on the trunk across a wider age range [ADDED: 17] — so age and localization separate these confusable classes in a way colour and texture cannot.
 
 The complete two-input model (`SE_Residual_MultiScale_CNN_Meta`) contains 8,226,794 parameters; the image-only variant used as the ablation reference contains 8,221,530 parameters.
 
@@ -122,7 +122,7 @@ Given the roughly 4 : 1 class imbalance, the network was trained with focal loss
 
 α_t · (1 − p_t)^γ · (−log p_t)
 
-where p_t is the predicted probability of the true class and α_t is the class-specific weighting factor. We used a focusing parameter γ = 1.5 and label smoothing ε = 0.05 applied to the one-hot targets before computing p_t.
+where p_t is the predicted probability of the true class and α_t is the class-specific weighting factor. We used a focusing parameter γ = 1.5 and label smoothing ε = 0.05 [ADDED: 21] applied to the one-hot targets before computing p_t.
 
 Class weighting α is the **single** imbalance correction employed. It was derived from balanced class weights (inverse class frequency), softened by a square-root transform, and normalized to sum to one; no oversampling and no manual clinical boost were used. Concentrating the correction in one softened α term keeps the Concerning class at roughly one in five images per batch while up-weighting its gradient contribution. The focusing parameter γ = 1.5 preserves a usable spread of output probabilities, and label smoothing acts primarily as a ranking (AUC) regularizer. Crucially, clinical sensitivity is **not** baked into the training objective; it is achieved at inference by selecting a high-sensitivity operating point (Section 3.7), which keeps balanced training and clinical bias cleanly separated and independently tunable.
 
@@ -158,13 +158,13 @@ To absorb the validation-to-test transfer gap, the selection target was set *abo
 
 ### 3.8. Temperature Scaling and Expected Calibration Error (ECE)
 
-To ensure that predicted probabilities are trustworthy for clinical interpretation, we applied post-hoc temperature scaling [5]. A single scalar temperature T was fit on the validation set by minimizing the negative log-likelihood and then applied to the test-set logits. Because temperature scaling is a monotonic transformation, it leaves AUC and the validation-selected sensitivity/specificity unchanged; its sole purpose is to improve probability calibration. Calibration quality was quantified by the Expected Calibration Error (ECE) using ten equal-width confidence bins, and visualized with a reliability diagram comparing empirical accuracy against mean predicted confidence before and after scaling.
+To ensure that predicted probabilities are trustworthy for clinical interpretation, we applied post-hoc temperature scaling [5]. A single scalar temperature T was fit on the validation set by minimizing the negative log-likelihood and then applied to the test-set logits. Because temperature scaling is a monotonic transformation, it leaves AUC and the validation-selected sensitivity/specificity unchanged; its sole purpose is to improve probability calibration. Calibration quality was quantified by the Expected Calibration Error (ECE) using ten equal-width confidence bins [ADDED: 22], and visualized with a reliability diagram comparing empirical accuracy against mean predicted confidence before and after scaling.
 
 For the champion model the fitted temperature was T = 0.722, and ECE improved marginally from 0.040 to 0.034. The near-identity temperature and low pre-scaling ECE indicate the model was already well-calibrated; temperature scaling therefore functions here as a confirmatory reliability analysis rather than a substantive correction.
 
 ### 3.9. Statistical Analysis
 
-Uncertainty in the headline metrics was quantified by non-parametric bootstrap resampling of the test set (B = 2,000 resamples), from which 95% confidence intervals were derived for AUC, sensitivity, and specificity. The test set comprises 2,001 images (389 Concerning, 1,612 Benign).
+Uncertainty in the headline metrics was quantified by non-parametric bootstrap resampling of the test set (B = 2,000 resamples) [ADDED: 23], from which 95% confidence intervals were derived for AUC, sensitivity, and specificity. The test set comprises 2,001 images (389 Concerning, 1,612 Benign).
 
 To compare the discriminative performance of the metadata-fusion model against the image-only model on the same test set, we used the paired DeLong test for the difference between two correlated areas under the ROC curve [6,7]. The paired test is appropriate here because both models are evaluated on identical samples, so their AUC estimates are correlated; comparing their marginal confidence intervals would ignore this correlation and understate the evidence for a difference.
 
@@ -213,7 +213,7 @@ On the identical test set, the metadata-fusion model (AUC 0.9047) significantly 
 
 ### 4.4. Calibration
 
-The champion model was well-calibrated before any correction. Post-hoc temperature scaling fitted a near-identity temperature of T = 0.722 on the validation set, and the test-set Expected Calibration Error improved only marginally, from 0.0403 to 0.0341 (ten-bin ECE). The reliability diagram (Figure X) shows empirical accuracy tracking mean predicted confidence closely both before and after scaling. Because temperature scaling is monotonic, AUC and the validation-selected sensitivity/specificity are unchanged; the analysis therefore serves as a confirmatory reliability check rather than a substantive correction — a point of methodological note, since a low pre-scaling ECE indicates the focal-loss training did not produce the probability compression sometimes attributed to it.
+The champion model was well-calibrated before any correction. Post-hoc temperature scaling fitted a near-identity temperature of T = 0.722 on the validation set, and the test-set Expected Calibration Error improved only marginally, from 0.0403 to 0.0341 (ten-bin ECE). The reliability diagram (Figure X) shows empirical accuracy tracking mean predicted confidence closely both before and after scaling. Because temperature scaling is monotonic, AUC and the validation-selected sensitivity/specificity are unchanged; the analysis therefore serves as a confirmatory reliability check rather than a substantive correction — a point of methodological note, since a low pre-scaling ECE indicates the focal-loss training did not produce the probability compression sometimes attributed to it [ADDED: 24].
 
 ### 4.5. Per-Diagnosis Breakdown
 
@@ -252,13 +252,13 @@ Retraining the champion configuration under five random seeds (fixed data split,
 
 The central finding is that a convolutional network trained entirely from scratch — with no ImageNet pretraining or transfer learning of any kind — reaches a mean AUC of 0.90 for binary skin-lesion triage on HAM10000, with sensitivity averaging 0.92 at a prospectively chosen operating point. This directly counters the prevailing assumption that pretrained backbones are a prerequisite for clinically relevant dermoscopic performance, and it does so under a leak-free lesion-level protocol that many prior reports do not enforce.
 
-The metadata-fusion result clarifies *where* the remaining performance came from. Two image-only interventions (colour constancy and MixUp) both failed to improve the model, whereas fusing patient age, sex, and anatomical localization produced a statistically significant AUC gain. The mechanism is interpretable: the most persistent confusion in this dataset is between actinic keratosis (Concerning) and benign keratosis (Benign), two categories that share brown/tan pigmentation and are therefore difficult to separate on colour and texture alone. Age and body site carry the discriminating signal — actinic keratosis concentrates on sun-exposed sites in older patients, benign keratosis is common on the trunk across a wider age range — which explains why a non-image branch succeeded where two image-only interventions did not. In the released model this manifested as the malignant categories separating further from benign (melanoma mean probability rising from 0.319 to 0.372, actinic keratosis from 0.438 to 0.500), lifting melanoma recall above 90% for the first time in the ablation.
+The metadata-fusion result clarifies *where* the remaining performance came from. Two image-only interventions (colour constancy and MixUp) both failed to improve the model, whereas fusing patient age, sex, and anatomical localization produced a statistically significant AUC gain. The mechanism is interpretable: the most persistent confusion in this dataset is between actinic keratosis (Concerning) and benign keratosis (Benign), two categories that share brown/tan pigmentation and are therefore difficult to separate on colour and texture alone. Age and body site carry the discriminating signal — actinic keratosis concentrates on sun-exposed sites in older patients, benign keratosis is common on the trunk across a wider age range [ADDED: 17] — which explains why a non-image branch succeeded where two image-only interventions did not. In the released model this manifested as the malignant categories separating further from benign (melanoma mean probability rising from 0.319 to 0.372, actinic keratosis from 0.438 to 0.500), lifting melanoma recall above 90% for the first time in the ablation.
 
 ### 5.2. Limitations
 
 #### 5.2.1. Single-Dataset Evaluation
 
-All results derive from a single dataset (HAM10000). Although the lesion-level split prevents within-dataset leakage, it cannot establish generalization across acquisition devices, populations, or clinical settings. Dermoscopic appearance and metadata distributions vary between sources, and the metadata branch in particular may not transfer if localization vocabularies or age distributions differ. External validation on an independent dataset (for example ISIC, PH2, or Derm7pt) is the most important next step before any deployment claim, and its absence bounds the strength of our generalization claims.
+All results derive from a single dataset (HAM10000). Although the lesion-level split prevents within-dataset leakage, it cannot establish generalization across acquisition devices, populations, or clinical settings. Dermoscopic appearance and metadata distributions vary between sources, and the metadata branch in particular may not transfer if localization vocabularies or age distributions differ. External validation on an independent dataset (for example ISIC [ADDED: 25], PH2 [ADDED: 26], or Derm7pt [ADDED: 19]) is the most important next step before any deployment claim, and its absence bounds the strength of our generalization claims.
 
 #### 5.2.2. Fixed Operating Specificity
 
@@ -308,7 +308,7 @@ Table 8 situates our results among representative HAM10000 classifiers. We empha
 
 ### 6.2. Future Work
 
-The most consequential next step is external validation on one or more independent datasets (ISIC, PH2, Derm7pt) to establish cross-source generalization. Beyond that, three directions follow from the present limitations: (i) stabilizing the operating-point sensitivity through seed ensembling or larger-calibration-set threshold selection; (ii) interpretability analysis (for example Grad-CAM saliency and failure-case review of missed melanomas) to build clinical trust; and (iii) narrowing the benign-keratosis false-positive rate, the dominant remaining specificity cost, potentially through richer metadata or targeted hard-negative training. Reporting seven-class performance alongside the binary triage decision would also provide finer diagnostic granularity where data support it.
+The most consequential next step is external validation on one or more independent datasets (ISIC, PH2, Derm7pt) to establish cross-source generalization. Beyond that, three directions follow from the present limitations: (i) stabilizing the operating-point sensitivity through seed ensembling or larger-calibration-set threshold selection; (ii) interpretability analysis (for example Grad-CAM saliency [ADDED: 27] and failure-case review of missed melanomas) to build clinical trust; and (iii) narrowing the benign-keratosis false-positive rate, the dominant remaining specificity cost, potentially through richer metadata or targeted hard-negative training. Reporting seven-class performance alongside the binary triage decision would also provide finer diagnostic granularity where data support it.
 
 ## References
 
@@ -331,5 +331,39 @@ The most consequential next step is external validation on one or more independe
 9. Collins GS, Moons KGM, Dhiman P, Riley RD, Beam AL, Van Calster B, et al. TRIPOD+AI statement: updated guidance for reporting clinical prediction models that use regression or machine learning methods. BMJ. 2024;385:e078378.
 
 10. Esteva A, Kuprel B, Novoa RA, Ko J, Swetter SM, Blau HM, et al. Dermatologist-level classification of skin cancer with deep neural networks. Nature. 2017;542(7639):115–8.
+
+11. Sung H, Ferlay J, Siegel RL, Laversanne M, Soerjomataram I, Jemal A, et al. Global cancer statistics 2020: GLOBOCAN estimates of incidence and mortality worldwide for 36 cancers in 185 countries. CA Cancer J Clin. 2021;71(3):209–49.
+
+12. Gershenwald JE, Scolyer RA, Hess KR, Sondak VK, Long GV, Ross MI, et al. Melanoma staging: evidence-based changes in the American Joint Committee on Cancer eighth edition cancer staging manual. CA Cancer J Clin. 2017;67(6):472–92.
+
+13. Kittler H, Pehamberger H, Wolff K, Binder M. Diagnostic accuracy of dermoscopy. Lancet Oncol. 2002;3(3):159–65.
+
+14. Deng J, Dong W, Socher R, Li LJ, Li K, Fei-Fei L. ImageNet: a large-scale hierarchical image database. In: Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition; 2009 Jun 20–25; Miami, FL, USA. IEEE; 2009. p. 248–55.
+
+15. Brinker TJ, Hekler A, Enk AH, Klode J, Hauschild A, Berking C, et al. Deep learning outperformed 136 of 157 dermatologists in a head-to-head dermoscopic melanoma image classification task. Eur J Cancer. 2019;113:47–54.
+
+16. Haenssle HA, Fink C, Schneiderbauer R, Toberer F, Buhl T, Blum A, et al. Man against machine: diagnostic performance of a deep learning convolutional neural network for dermoscopic melanoma recognition in comparison to 58 dermatologists. Ann Oncol. 2018;29(8):1836–42.
+
+17. Criscione VD, Weinstock MA, Naylor MF, Luque C, Eide MJ, Bingham SF. Actinic keratoses: natural history and risk of malignant transformation in the Veterans Affairs Topical Tretinoin Chemoprevention Trial. Cancer. 2009;115(11):2523–30.
+
+18. Pacheco AGC, Krohling RA. The impact of patient clinical information on automated skin cancer detection. Comput Biol Med. 2020;116:103545.
+
+19. Kawahara J, Daneshvar S, Argenziano G, Hamarneh G. Seven-point checklist and skin lesion classification using multitask multimodal neural networks. IEEE J Biomed Health Inform. 2019;23(2):538–46.
+
+20. Kaufman S, Rosset S, Perlich C, Stitelman O. Leakage in data mining: formulation, detection, and avoidance. ACM Trans Knowl Discov Data. 2012;6(4):15.
+
+21. Szegedy C, Vanhoucke V, Ioffe S, Shlens J, Wojna Z. Rethinking the Inception architecture for computer vision. In: Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition; 2016 Jun 27–30; Las Vegas, NV, USA. IEEE; 2016. p. 2818–26.
+
+22. Naeini MP, Cooper GF, Hauskrecht M. Obtaining well calibrated probabilities using Bayesian binning. In: Proceedings of the 29th AAAI Conference on Artificial Intelligence; 2015 Jan 25–30; Austin, TX, USA. AAAI Press; 2015. p. 2901–7.
+
+23. Efron B, Tibshirani RJ. An introduction to the bootstrap. New York: Chapman & Hall/CRC; 1993.
+
+24. Mukhoti J, Kulharia V, Sanyal A, Golodetz S, Torr PHS, Dokania PK. Calibrating deep neural networks using focal loss. In: Advances in Neural Information Processing Systems 33 (NeurIPS 2020); 2020 Dec 6–12; Virtual. p. 15288–99.
+
+25. Codella NCF, Gutman D, Celebi ME, Helba B, Marchetti MA, Dusza SW, et al. Skin lesion analysis toward melanoma detection: a challenge at the 2017 International Symposium on Biomedical Imaging (ISBI), hosted by the International Skin Imaging Collaboration (ISIC). In: Proceedings of the IEEE International Symposium on Biomedical Imaging; 2018 Apr 4–7; Washington, DC, USA. IEEE; 2018. p. 168–72.
+
+26. Mendonça T, Ferreira PM, Marques JS, Marçal ARS, Rozeira J. PH2 — a dermoscopic image database for research and benchmarking. In: Proceedings of the 35th Annual International Conference of the IEEE Engineering in Medicine and Biology Society (EMBC); 2013 Jul 3–7; Osaka, Japan. IEEE; 2013. p. 5437–40.
+
+27. Selvaraju RR, Cogswell M, Das A, Vedantam R, Parikh D, Batra D. Grad-CAM: visual explanations from deep networks via gradient-based localization. In: Proceedings of the IEEE International Conference on Computer Vision; 2017 Oct 22–29; Venice, Italy. IEEE; 2017. p. 618–26.
 
 *Note: references will be renumbered in order of first appearance when the full paper is finalised (Introduction precedes Methods).*
