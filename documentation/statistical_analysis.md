@@ -8,11 +8,17 @@ _Test set: n=2001 (389 Concerning, 1612 Benign). Bootstrap B=2000, seed=42. Oper
 |---|---|---|:---:|---|---|
 | Run1_image_only | 0.8950 (0.8798–0.9102) | 0.8795–0.9100 | 0.101 | 0.9512 (0.929–0.972) | 0.6433 (0.621–0.666) |
 | Run4_metadata | 0.9047 (0.8906–0.9187) | 0.8907–0.9179 | 0.169 | 0.9229 (0.896–0.948) | 0.7171 (0.695–0.740) |
+| Transfer_effb0 | 0.9160 (0.9017–0.9302) | 0.9017–0.9299 | 0.392 | 0.8920 (0.860–0.922) | 0.7785 (0.758–0.799) |
 
 ## Paired DeLong test — Run4_metadata vs Run1_image_only
 
 - AUC Run1_image_only = **0.8950**, AUC Run4_metadata = **0.9047**, Δ = **+0.0097**
-- z = -2.030, **p = 0.0423** → metadata fusion is **SIGNIFICANT (p < 0.05)** vs image-only, on the same test set.
+- z = -2.030, **p = 0.0423** → Run4_metadata is **SIGNIFICANT (p < 0.05)** vs Run1_image_only, on the same test set.
+
+## Paired DeLong test — Transfer_effb0 vs Run1_image_only
+
+- AUC Run1_image_only = **0.8950**, AUC Transfer_effb0 = **0.9160**, Δ = **+0.0210**
+- z = -3.089, **p = 0.0020** → Transfer_effb0 is **SIGNIFICANT (p < 0.05)** vs Run1_image_only, on the same test set.
 
 ## Multi-seed champion (5 seeds) — mean ± std
 

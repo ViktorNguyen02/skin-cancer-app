@@ -41,11 +41,18 @@ images_path_2 = os.path.join(script_dir, 'data', 'HAM10000_images_part_2')
 # is excluded — different preprocessing + rejected anyway). The two-input Run 4
 # model is auto-detected via len(model.inputs).
 MODELS = {
-    'Run1_image_only': 'best_model_run1_calib.h5',   # baseline image-only champion
-    'Run4_metadata':   'best_model_run4_meta.h5',     # metadata-fusion champion
+    'Run1_image_only': 'best_model_run1_calib.h5',    # from-scratch image-only champion
+    'Run4_metadata':   'best_model_run4_meta.h5',      # from-scratch metadata-fusion champion
+    'Transfer_effb0':  'best_model_transfer_effb0.h5', # EfficientNet-B0 transfer baseline (image-only)
 }
-# Which pair to run the paired DeLong significance test on (baseline, candidate):
-DELONG_PAIR = ('Run1_image_only', 'Run4_metadata')
+# Paired DeLong significance tests (baseline, candidate). Each runs on the same test set.
+#   1. metadata effect:    from-scratch image-only  vs  from-scratch metadata
+#   2. pretraining effect: from-scratch image-only  vs  EfficientNet-B0 transfer (fair: same inputs)
+# Skipped automatically if either model file is missing.
+DELONG_PAIRS = [
+    ('Run1_image_only', 'Run4_metadata'),
+    ('Run1_image_only', 'Transfer_effb0'),
+]
 
 GROUP_ORDER        = ['Benign', 'Concerning']
 CONCERNING_IDX     = 1
@@ -286,9 +293,10 @@ def main():
                      f"{sens:.4f} ({sn_lo:.3f}–{sn_hi:.3f}) | "
                      f"{spec:.4f} ({sp_lo:.3f}–{sp_hi:.3f}) |")
 
-    # ── Paired DeLong significance test ──────────────────────────────────────
-    a, b = DELONG_PAIR
-    if a in results and b in results:
+    # ── Paired DeLong significance tests ─────────────────────────────────────
+    for a, b in DELONG_PAIRS:
+        if a not in results or b not in results:
+            continue
         auc_a, auc_b, z, p = delong_paired_test(
             test_true, results[a]['test_probs'], results[b]['test_probs'])
         verdict = "SIGNIFICANT (p < 0.05)" if p < 0.05 else "NOT significant (p ≥ 0.05)"
@@ -300,8 +308,8 @@ def main():
         lines.append(f"\n## Paired DeLong test — {b} vs {a}\n")
         lines.append(f"- AUC {a} = **{auc_a:.4f}**, AUC {b} = **{auc_b:.4f}**, "
                      f"Δ = **{auc_b-auc_a:+.4f}**")
-        lines.append(f"- z = {z:.3f}, **p = {p:.4f}** → metadata fusion is **{verdict}** "
-                     f"vs image-only, on the same test set.")
+        lines.append(f"- z = {z:.3f}, **p = {p:.4f}** → {b} is **{verdict}** "
+                     f"vs {a}, on the same test set.")
 
     # ── Optional: aggregate multi-seed predictions if present ─────────────────
     seed_files = sorted(glob.glob(os.path.join(script_dir, 'multiseed', 'preds_seed*.npz')))

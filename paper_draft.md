@@ -48,7 +48,19 @@ The contributions of this work are as follows:
 
 ## 2. Related Work
 
-### 2.1. The From-Scratch Angle Against the Transfer-Learning Mainstream
+### 2.1. Transfer Learning as the HAM10000 Mainstream
+
+Since the demonstration that deep networks can reach dermatologist-level lesion classification [10], the dominant approach to HAM10000 has been transfer learning: fine-tuning convolutional backbones pretrained on ImageNet. Architectures such as VGG, Inception, ResNet, DenseNet, Xception, and the EfficientNet family have been adapted to the seven-class problem, typically by replacing the classifier head and fine-tuning some or all of the backbone [CITE: transfer-learning HAM10000 example 1], [CITE: EfficientNet/DenseNet on HAM10000], [CITE: ResNet/Inception on HAM10000]. Reported figures are strong, frequently exceeding 90% accuracy with AUCs in the 0.94–0.97 range, and this paradigm now constitutes the de facto baseline against which new methods are measured. The empirical success is unsurprising: ImageNet pretraining supplies low-level edge, colour, and texture filters that are expensive to learn from roughly ten thousand images alone, and fine-tuning adapts these priors to dermoscopy at modest data cost. The question this leaves — and the one our work addresses — is how much of the reported performance is attributable to the pretrained prior itself, and how much survives when the evaluation protocol is tightened (Section 2.3).
+
+### 2.2. From-Scratch CNNs on HAM10000
+
+A smaller body of work trains CNN weights from random initialization, without any pretrained backbone. These studies cluster in a markedly lower and wider performance band — roughly 73–93% accuracy — and rarely exceed three to five convolutional blocks, a direct consequence of training from scratch on a dataset too small to support deeper networks without overfitting. Al-Asadi and Altun [CITE: Al-Asadi & Altun 2022] trained a four-convolution network with pixel-level SMOTE oversampling, reaching approximately 86% test accuracy. Polat and Koç [CITE: Polat & Koç 2020] showed that decomposing the imbalanced seven-class task into seven one-vs-rest binary problems raised accuracy from 77% to 92.9% — a structural gain from problem reformulation rather than architectural depth, and a precedent for the binary framing we adopt (Section 3.2). Closest to our own design, [CITE: ITM 2025 SE-attention custom CNN] combined a custom CNN backbone with squeeze-and-excitation attention and focal loss, yet reported that transfer-learning comparators still outperformed it (ResNet50 at 77% accuracy, EfficientNet-B4 at AUC 0.943) — a direct claim that architectural attention and focal loss alone do not close the gap to pretraining. Our results qualify that claim: with residual depth, multi-scale fusion, metadata fusion, and — critically — a leak-free evaluation, a from-scratch network reaches competitive, honestly-measured performance (Section 4).
+
+A recurring caution applies to the highest reported from-scratch numbers. Musthafa et al. [CITE: Musthafa et al. 2024] reported 97.8% test accuracy from a from-scratch CNN while simultaneously documenting overfitting onset at epoch 20 and stating no lesion-level splitting protocol. Because HAM10000 contains multiple images of the same physical lesion (shared `lesion_id`), an image-level split places near-duplicate acquisitions of one lesion in both training and test — the textbook signature of leakage, and the most parsimonious explanation for accuracy far above the rest of the from-scratch literature. We therefore treat such figures as protocol artifacts rather than attainable targets, and design our evaluation explicitly to exclude this confound (Section 3.3).
+
+### 2.3. Metadata Fusion and Evaluation Rigour
+
+Two further gaps motivate our contribution. First, the majority of HAM10000 classifiers discard the patient metadata released with the dataset [CITE: metadata-discarding classifier 1], [CITE: image-only classifier 2], treating the task as pure image classification, despite age and anatomical site carrying diagnostic signal that pixels do not (Section 5.1). Multimodal image-plus-metadata approaches exist in the broader dermatology literature [CITE: multimodal image+metadata fusion in dermatology] but remain the exception on HAM10000. Second, validation hygiene and statistical reporting are inconsistent: few studies confirm a lesion-level rather than image-level split [CITE: duplicate-lesion / leakage discussion], and fewer still report confidence intervals or significance tests, leaving headline numbers difficult to compare or trust. Our work targets all three gaps simultaneously — a from-scratch architecture, patient-metadata fusion, and a verified leak-free protocol with bootstrap confidence intervals and paired DeLong significance testing — and, uniquely among the works surveyed, reports a fine-tuned transfer-learning baseline under identical conditions so that the effect of pretraining is measured rather than assumed.
 
 ## 3. Methods
 
@@ -246,6 +258,22 @@ Retraining the champion configuration under five random seeds (fixed data split,
 | 5 | 0.9026 | 0.8817 | 0.7618 |
 | **Mean ± SD** | **0.9014 ± 0.0095** | **0.9249 ± 0.0427** | **0.7073 ± 0.0499** |
 
+### 4.7. Transfer-Learning Baseline
+
+To quantify the effect of the from-scratch constraint rather than assume it, we trained a fine-tuned EfficientNet-B0 [CITE: EfficientNet / Tan & Le 2019] under an otherwise identical protocol: the same leak-free lesion-level split, binary mapping, focal loss, validation-selected operating point, and [0, 1] image inputs, with the only difference being ImageNet-pretrained versus random initialization. The backbone was fine-tuned in two phases — frozen-backbone head training, then low-learning-rate fine-tuning of the backbone with batch-normalization layers held frozen. Evaluated identically, the transfer baseline achieved a test AUC of 0.9160 (DeLong 95% CI 0.9017–0.9302), with sensitivity 0.892 and specificity 0.779 at its validation-selected threshold (Table 8).
+
+Two comparisons follow. First, on the identical test set the transfer model significantly outperformed the from-scratch image-only model (AUC 0.8950): paired DeLong ΔAUC = +0.0210, z = −3.089, p = 0.0020. Pretraining therefore confers a real and statistically significant advantage — roughly twice the magnitude of the metadata-fusion effect (Section 4.3) — and we do not claim parity with transfer learning. Second, however, this honestly-measured 0.916 sits well below the 0.94–0.97 AUCs commonly reported for transfer learning on HAM10000, consistent with a substantial portion of that reported superiority arising from image-level leakage (Section 2.2) rather than from pretraining alone. Notably, the transfer baseline also failed to hold the 0.90 sensitivity floor at its validation-selected threshold (0.892), mirroring the seed-dependent operating-point behaviour observed for the from-scratch model (Section 4.6) — evidence that validation-to-test threshold transfer is a general property of this dataset rather than a weakness specific to from-scratch training.
+
+**Table 8.** From-scratch versus transfer learning under the identical leak-free protocol (same split, loss, and operating-point selection). All models scored once on the test set (n = 2,001). ΔAUC and p are from paired DeLong tests against the from-scratch image-only model.
+
+| Model | Pretrained | AUC (95% CI) | Sens | Spec | ΔAUC vs image-only | p |
+| --- | :---: | --- | :---: | :---: | :---: | :---: |
+| From-scratch, image-only (Run 1) | No | 0.8950 (0.880–0.910) | 0.9512 | 0.6433 | — | — |
+| From-scratch, + metadata (champion) | No | 0.9047 (0.891–0.919) | 0.9229 | 0.7171 | +0.0097 | 0.042 |
+| EfficientNet-B0, image-only (transfer) | Yes | 0.9160 (0.902–0.930) | 0.8920 | 0.7785 | +0.0210 | 0.0020 |
+
+> _[PENDING] A metadata-fused transfer variant (EfficientNet-B0 + age/sex/localization, `baseline_transfer.py --metadata`) is under evaluation; its result will be added as a fourth row to test whether the metadata benefit generalizes across backbones._
+
 ## 5. Discussion
 
 ### 5.1. Interpretation
@@ -274,21 +302,23 @@ While the AUC is stable across seeds (0.9014 ± 0.0095), the sensitivity at the 
 
 ### 5.3. Comparison to Prior HAM10000 Work
 
-Table 8 situates our results among representative HAM10000 classifiers. We emphasize two axes on which our work differs from the mainstream: whether the model uses pretrained weights, and whether the evaluation enforces a lesion-level (leak-free) split. Direct numerical comparison is complicated by differing task definitions (7-class vs. binary vs. one-vs-rest), split protocols, and metric conventions; the table is therefore intended to position the from-scratch, metadata-fused, leak-controlled approach rather than to claim state-of-the-art on a common benchmark.
+Table 9 situates our results among representative HAM10000 studies. Direct numerical comparison is inherently limited: prior work differs in task definition (seven-class vs. binary vs. one-vs-rest), in reported metric (most report seven-class accuracy rather than AUC), and — most consequentially — in split protocol. We therefore use the table to position approaches along the two axes that most affect trustworthiness, pretraining and split integrity, rather than to rank raw numbers, which are not commensurable across these differences.
 
-> **[TEMPLATE — populate from the literature; do not leave placeholders in the submitted version.]**
-> Replace each `[CITE]` / `[value]` with a sourced entry. Suggested inclusion criteria: (i) uses HAM10000; (ii) reports AUC and/or sensitivity/specificity; (iii) states its split protocol. Aim for 5–8 representative rows spanning transfer-learning CNNs, attention/ensemble methods, and any from-scratch or multimodal baselines you can find. Mark our own row in bold.
+Two observations stand out. First, ours are the only entries with a verified lesion-level split that report both a from-scratch model and a transfer baseline under identical conditions — precisely the controlled comparison the field largely lacks. Second, the highest prior accuracies coincide with unstated or image-level splitting (Section 2.2), reinforcing that leakage, not architecture, most plausibly explains the gap between those figures and the honestly-measured 0.90–0.92 band that we and a fairly-evaluated transfer baseline both occupy. Our from-scratch champion (AUC 0.901 ± 0.010) trails a fine-tuned EfficientNet-B0 (0.916) by a modest, quantified margin, while exceeding the realistic from-scratch literature and remaining clinically useful at a high-sensitivity operating point.
 
-**Table 8.** Representative HAM10000 classification results in context. "Pretrained" = uses ImageNet or other transfer learning; "Lesion-level split" = evaluation guaranteed free of same-lesion leakage.
+**Table 9.** Representative HAM10000 results in context. "Pretrained" = uses ImageNet/transfer learning; "Leak-free split" = evaluation verified free of same-lesion leakage. Metrics are as reported by each source; accuracy (acc) and AUC are not directly comparable, and seven-class results are not comparable to our binary task — the table positions method characteristics, not a common-benchmark ranking.
 
-| Study | Approach / backbone | Pretrained | Task | Lesion-level split | AUC | Sens | Spec |
-| --- | --- | :---: | --- | :---: | :---: | :---: | :---: |
-| [CITE] | [e.g. fine-tuned EfficientNet] | Yes | 7-class | [?] | [value] | [value] | [value] |
-| [CITE] | [e.g. ResNet + attention] | Yes | 7-class | [?] | [value] | [value] | [value] |
-| [CITE] | [e.g. ensemble] | Yes | binary mel-vs-rest | [?] | [value] | [value] | [value] |
-| [CITE] | [e.g. from-scratch CNN, if any] | No | [task] | [?] | [value] | [value] | [value] |
-| [CITE] | [e.g. image + metadata multimodal] | Yes | [task] | [?] | [value] | [value] | [value] |
-| **This work** | **From-scratch SE-residual + multi-scale + metadata** | **No** | **binary Concerning-vs-Benign** | **Yes** | **0.901 ± 0.010** | **0.925 ± 0.043** | **0.707 ± 0.050** |
+| Study | Approach / backbone | Pretrained | Task | Leak-free split | Reported performance |
+| --- | --- | :---: | --- | :---: | --- |
+| [CITE: representative transfer EfficientNet on HAM10000] | Fine-tuned EfficientNet | Yes | 7-class | Not stated | AUC ≈ 0.94 ‡ |
+| [CITE: ITM 2025] | Custom SE-attention CNN + transfer comparators | No / Yes | 7-class | Not stated | EfficientNet-B4 AUC 0.943; custom CNN lower ‡ |
+| [CITE: Musthafa et al. 2024] | From-scratch CNN + checkpoints | No | 7-class | Not stated § | acc 97.8% § |
+| [CITE: Polat & Koç 2020] | From-scratch CNN + one-vs-all | No | 7-class | Not stated | acc 92.9% |
+| [CITE: Al-Asadi & Altun 2022] | From-scratch 4-conv + pixel SMOTE | No | 7-class | Not stated | acc ≈ 86% |
+| **This work — transfer baseline** | **EfficientNet-B0 fine-tuned** | **Yes** | **binary Concerning/Benign** | **Yes** | **AUC 0.916; Sens 0.892; Spec 0.779** |
+| **This work — from-scratch champion** | **SE-residual + multi-scale + metadata** | **No** | **binary Concerning/Benign** | **Yes** | **AUC 0.901 ± 0.010; Sens 0.925; Spec 0.707** |
+
+‡ AUC as reported by the source under its own (unverified) protocol. § Reported accuracy under an unstated split; the documented early overfitting and the absence of lesion-level splitting suggest probable image-level leakage (Section 2.2), so this figure should not be read as an attainable from-scratch target.
 
 ## 6. Conclusion
 
