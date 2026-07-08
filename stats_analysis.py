@@ -41,17 +41,22 @@ images_path_2 = os.path.join(script_dir, 'data', 'HAM10000_images_part_2')
 # is excluded — different preprocessing + rejected anyway). The two-input Run 4
 # model is auto-detected via len(model.inputs).
 MODELS = {
-    'Run1_image_only': 'best_model_run1_calib.h5',    # from-scratch image-only champion
-    'Run4_metadata':   'best_model_run4_meta.h5',      # from-scratch metadata-fusion champion
-    'Transfer_effb0':  'best_model_transfer_effb0.h5', # EfficientNet-B0 transfer baseline (image-only)
+    'Run1_image_only':     'best_model_run1_calib.h5',         # from-scratch image-only champion
+    'Run4_metadata':       'best_model_run4_meta.h5',           # from-scratch metadata-fusion champion
+    'Transfer_effb0':      'best_model_transfer_effb0.h5',      # EfficientNet-B0 transfer (image-only)
+    'Transfer_effb0_meta': 'best_model_transfer_effb0_meta.h5', # EfficientNet-B0 transfer + metadata
 }
 # Paired DeLong significance tests (baseline, candidate). Each runs on the same test set.
-#   1. metadata effect:    from-scratch image-only  vs  from-scratch metadata
-#   2. pretraining effect: from-scratch image-only  vs  EfficientNet-B0 transfer (fair: same inputs)
+#   1. metadata effect (from-scratch):  image-only    vs  metadata
+#   2. pretraining effect (fair):        from-scratch  vs  transfer (both image-only)
+#   3. metadata effect (transfer):       transfer      vs  transfer+metadata  ← does metadata generalize?
+#   4. overall best-vs-best:             from-scratch champion  vs  transfer
 # Skipped automatically if either model file is missing.
 DELONG_PAIRS = [
     ('Run1_image_only', 'Run4_metadata'),
     ('Run1_image_only', 'Transfer_effb0'),
+    ('Transfer_effb0',  'Transfer_effb0_meta'),
+    ('Run4_metadata',   'Transfer_effb0'),
 ]
 
 GROUP_ORDER        = ['Benign', 'Concerning']

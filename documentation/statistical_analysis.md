@@ -8,7 +8,8 @@ _Test set: n=2001 (389 Concerning, 1612 Benign). Bootstrap B=2000, seed=42. Oper
 |---|---|---|:---:|---|---|
 | Run1_image_only | 0.8950 (0.8798–0.9102) | 0.8795–0.9100 | 0.101 | 0.9512 (0.929–0.972) | 0.6433 (0.621–0.666) |
 | Run4_metadata | 0.9047 (0.8906–0.9187) | 0.8907–0.9179 | 0.169 | 0.9229 (0.896–0.948) | 0.7171 (0.695–0.740) |
-| Transfer_effb0 | 0.9160 (0.9017–0.9302) | 0.9017–0.9299 | 0.392 | 0.8920 (0.860–0.922) | 0.7785 (0.758–0.799) |
+| Transfer_effb0 | 0.9195 (0.9056–0.9334) | 0.9048–0.9329 | 0.333 | 0.8997 (0.869–0.928) | 0.7426 (0.721–0.763) |
+| Transfer_effb0_meta | 0.9230 (0.9096–0.9364) | 0.9091–0.9353 | 0.397 | 0.9023 (0.872–0.930) | 0.7730 (0.753–0.794) |
 
 ## Paired DeLong test — Run4_metadata vs Run1_image_only
 
@@ -17,8 +18,18 @@ _Test set: n=2001 (389 Concerning, 1612 Benign). Bootstrap B=2000, seed=42. Oper
 
 ## Paired DeLong test — Transfer_effb0 vs Run1_image_only
 
-- AUC Run1_image_only = **0.8950**, AUC Transfer_effb0 = **0.9160**, Δ = **+0.0210**
-- z = -3.089, **p = 0.0020** → Transfer_effb0 is **SIGNIFICANT (p < 0.05)** vs Run1_image_only, on the same test set.
+- AUC Run1_image_only = **0.8950**, AUC Transfer_effb0 = **0.9195**, Δ = **+0.0245**
+- z = -3.498, **p = 0.0005** → Transfer_effb0 is **SIGNIFICANT (p < 0.05)** vs Run1_image_only, on the same test set.
+
+## Paired DeLong test — Transfer_effb0_meta vs Transfer_effb0
+
+- AUC Transfer_effb0 = **0.9195**, AUC Transfer_effb0_meta = **0.9230**, Δ = **+0.0035**
+- z = -0.894, **p = 0.3713** → Transfer_effb0_meta is **NOT significant (p ≥ 0.05)** vs Transfer_effb0, on the same test set.
+
+## Paired DeLong test — Transfer_effb0 vs Run4_metadata
+
+- AUC Run4_metadata = **0.9047**, AUC Transfer_effb0 = **0.9195**, Δ = **+0.0148**
+- z = -2.017, **p = 0.0437** → Transfer_effb0 is **SIGNIFICANT (p < 0.05)** vs Run4_metadata, on the same test set.
 
 ## Multi-seed champion (5 seeds) — mean ± std
 
